@@ -19,7 +19,8 @@
   :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; border-radius: 10px; }
   .app { display: grid; grid-template-rows: auto 1fr auto; height: 100%; }
 
-  header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; background: linear-gradient(rgba(5,6,13,.75), rgba(5,6,13,0)); }
+  footer { background: linear-gradient(rgba(5,6,13,0), rgba(5,6,13,.8)); }
   .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; letter-spacing: .2px; }
   .brand b { color: var(--magenta); font-weight: 600; }
   .pill { display: inline-flex; align-items: center; gap: 7px; padding: 4px 10px; border: 1px solid var(--line);
@@ -32,10 +33,15 @@
   .icon-btn[aria-pressed="true"] { color: var(--text); border-color: var(--violet); background: rgba(139,92,246,.14); }
   .icon-btn.danger[aria-pressed="true"] { border-color: var(--bad); background: rgba(248,113,113,.12); }
 
-  main { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 0; }
-  #orb { width: min(72vh, 92vw); height: min(72vh, 92vw); cursor: pointer; }
-  .state { margin-top: -6px; font-size: 13px; letter-spacing: .18em; text-transform: uppercase; color: var(--dim); height: 20px; }
-  .captions { width: min(760px, 92vw); text-align: center; min-height: 92px; margin-top: 10px; }
+  main { position: relative; display: flex; flex-direction: column; align-items: center; min-height: 0; }
+  /* The galaxy is the whole window's backdrop; the UI floats over it. */
+  #orb { position: fixed; inset: 0; width: 100vw; height: 100vh; cursor: pointer; display: block; z-index: 0; }
+  header, footer, .state, .captions, .toast { position: relative; z-index: 2; }
+  main { pointer-events: none; } main > * { pointer-events: auto; } #orb { pointer-events: auto; }
+  .spacer-orb { flex: 1 1 auto; pointer-events: none; }
+  .captions { text-shadow: 0 1px 12px rgba(5,6,13,.95), 0 0 2px rgba(5,6,13,.9); }
+  .state { flex: none; margin-top: 2px; font-size: 13px; letter-spacing: .18em; text-transform: uppercase; color: var(--dim); height: 20px; }
+  .captions { width: min(760px, 92vw); text-align: center; min-height: 92px; margin-top: 4px; flex: none; }
   #you { color: var(--cyan); font-size: 14px; min-height: 21px; opacity: .9; }
   #say { font-size: 19px; line-height: 1.45; margin-top: 6px; color: var(--text); text-wrap: balance; }
   #say .cursor { display: inline-block; width: .55ch; background: var(--magenta); animation: blink 1s steps(1) infinite; margin-left: 2px; }
@@ -127,6 +133,7 @@
 
   <main>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <div class="spacer-orb"></div>
     <canvas id="orb" role="img" aria-label="Orion's orb: it brightens when listening, swirls when thinking and pulses when speaking"></canvas>
     <div class="state" id="state" aria-live="polite">Starting…</div>
     <div class="captions">
@@ -443,7 +450,7 @@ const STATES = {
 let cur = { ...STATES.idle }, mic = 0, out = 0, time = 0, yaw = 0, galaxyAngle = 0, last = performance.now();
 
 /* Galaxy disk: two logarithmic spiral arms of binary "stars" plus a scattered halo. Positions are in orb radii. */
-const GALAXY = Array.from({ length: 2200 }, (_, i) => {
+const GALAXY = Array.from({ length: 3200 }, (_, i) => {
   const arm = i % 2, inArm = Math.random() < .78;
   const r = .55 + Math.pow(Math.random(), .7) * 1.75;                      // denser toward the core
   const base = arm * Math.PI + Math.log(r) * 2.4;                          // spiral: angle grows with log(radius)
@@ -452,7 +459,7 @@ const GALAXY = Array.from({ length: 2200 }, (_, i) => {
            ch: Math.random() < .5 ? "0" : "1", glyph: Math.random() < .38 };  // a share render as digits
 });
 // Soft dust clouds that trace the arms, so the galaxy reads as one glowing body, not loose dots
-const CLOUDS = Array.from({ length: 90 }, (_, i) => {
+const CLOUDS = Array.from({ length: 160 }, (_, i) => {
   const arm = i % 2, r = .6 + Math.random() * 1.6;
   return { r, a: arm * Math.PI + Math.log(r) * 2.4 + (Math.random() - .5) * .35, size: .18 + Math.random() * .28, seed: Math.random() };
 });
@@ -511,7 +518,10 @@ function frame(now) {
   const slow = reduced ? .3 : 1;
   time += dt * cur.speed * slow; yaw += dt * cur.spin * slow; galaxyAngle += dt * cur.swirl * slow;
 
-  const W = canvas.width, H = canvas.height, cx = W / 2, cy = H / 2, G = Math.min(W, H) * .27, R = G * .55, F = 3.4;
+  // The galaxy spans the window; the orb sits in the open space between the header and the captions.
+  const W = canvas.width, H = canvas.height, cx = W / 2, cy = H * .43;
+  const G = Math.max(W, H) * .25, R = Math.min(W, H) * .15, F = 3.4;
+  const U = Math.min(W, H) * .27;  // size unit for digits, stars and labels
   ctx.clearRect(0, 0, W, H);
 
   // Deep-space glow behind everything
@@ -523,7 +533,7 @@ function frame(now) {
   ctx.fillStyle = halo; ctx.fillRect(0, 0, W, H);
 
   // Constellation layout and glow levels
-  const on = starTargets(live.muted ? "idle" : live.state), S = G * 1.48;
+  const on = starTargets(live.muted ? "idle" : live.state), S = Math.min(W, H) * .40;
   const lit = [];
   for (const s of Object.values(STARS)) {
     s.glow = lerp(s.glow, on.has(s.name) ? 1 : 0, Math.min(1, dt * 5));
@@ -560,10 +570,10 @@ function frame(now) {
       const rim = Math.min(1, Math.max(0, (2.3 - p.r) / .55));  // fade out toward the galaxy's edge
       const alpha = Math.min(1, ((.32 + .6 * cur.arms * tw) * depth * (1.7 - p.r * .32) + boost * .8) * rim);
       if (p.glyph) {
-        ctx.font = `${(G / 20 * (1.3 - p.r * .2) * (front ? 1 : .8)).toFixed(1)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+        ctx.font = `${(U / 20 * (1.3 - p.r * .2) * (front ? 1 : .8)).toFixed(1)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
         ctx.fillStyle = `rgba(${col},${alpha})`; ctx.fillText(p.ch, x, y);
       } else {
-        const sz = (G / 170) * (1.6 - p.r * .3) * (1 + boost);
+        const sz = (U / 170) * (1.6 - p.r * .3) * (1 + boost);
         ctx.fillStyle = `rgba(${col},${alpha * .9})`; ctx.fillRect(x - sz / 2, y - sz / 2, sz, sz);
       }
     }
@@ -571,7 +581,7 @@ function frame(now) {
   for (const c of CLOUDS) {                                    // nebular glow along the arms
     const [x, y] = gal(c.r, c.a + galaxyAngle * (1.6 / Math.sqrt(c.r)), 0);
     const col = c.r < 1.1 ? HOT : mix(MID, ICE, Math.min(1, (c.r - 1.1) / 1.1));
-    const rad = c.size * G, a = (.05 + .07 * cur.arms + .05 * energy) * (1.5 - c.r * .4) * Math.min(1, (2.3 - c.r) / .6);
+    const rad = c.size * U * 1.25, a = (.03 + .045 * cur.arms + .03 * energy) * (1.5 - c.r * .4) * Math.min(1, (2.3 - c.r) / .6);
     const g = ctx.createRadialGradient(x, y, 0, x, y, rad);
     g.addColorStop(0, `rgba(${col},${a})`); g.addColorStop(1, `rgba(${col},0)`);
     ctx.fillStyle = g; ctx.beginPath(); ctx.arc(x, y, rad, 0, Math.PI * 2); ctx.fill();
@@ -618,7 +628,7 @@ function frame(now) {
   drawGalaxy(true);                                            // near side of the disk, in front of the core
 
   // Constellation streams: binary flowing along each line, toward the active star
-  ctx.font = `${(G / 30).toFixed(1)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+  ctx.font = `${(U / 30).toFixed(1)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
   for (const line of STREAMS) {
     const A = STARS[line.a], B = STARS[line.b], level = Math.max(A.level, B.level);
     const dir = B.level > A.level ? 1 : A.level > B.level ? -1 : 1;
@@ -632,11 +642,11 @@ function frame(now) {
   }
   // Stars: glow into the galaxy rather than sitting on it
   for (const s of Object.values(STARS)) {
-    const tw = .8 + .2 * Math.sin(now / 700 + s.x * 13), base = G / 90, L = s.level;
+    const tw = .8 + .2 * Math.sin(now / 700 + s.x * 13), base = U / 90, L = s.level;
     if (s.name === "M42") {
-      const g = ctx.createRadialGradient(s.px, s.py, 0, s.px, s.py, G * (.12 + L * .1));
+      const g = ctx.createRadialGradient(s.px, s.py, 0, s.px, s.py, U * (.12 + L * .1));
       g.addColorStop(0, `rgba(${s.col},${.32 + L * .5})`); g.addColorStop(.5, `rgba(217,70,239,${.12 + L * .2})`); g.addColorStop(1, "rgba(217,70,239,0)");
-      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(s.px, s.py, G * .22, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(s.px, s.py, U * .22, 0, Math.PI * 2); ctx.fill();
     }
     const rad = base * (4 + L * 10);
     const halo2 = ctx.createRadialGradient(s.px, s.py, 0, s.px, s.py, rad);
@@ -644,18 +654,18 @@ function frame(now) {
     ctx.fillStyle = halo2; ctx.beginPath(); ctx.arc(s.px, s.py, rad, 0, Math.PI * 2); ctx.fill();
     // four-point diffraction spikes, longer when lit
     const spike = base * (3 + L * 9);
-    ctx.strokeStyle = `rgba(${s.col},${.25 + L * .5})`; ctx.lineWidth = Math.max(1, G / 500);
+    ctx.strokeStyle = `rgba(${s.col},${.25 + L * .5})`; ctx.lineWidth = Math.max(1, U / 500);
     ctx.beginPath(); ctx.moveTo(s.px - spike, s.py); ctx.lineTo(s.px + spike, s.py); ctx.moveTo(s.px, s.py - spike); ctx.lineTo(s.px, s.py + spike); ctx.stroke();
     ctx.fillStyle = `rgba(255,255,255,${.8 + L * .2})`; ctx.beginPath(); ctx.arc(s.px, s.py, base * (.6 + L * .5), 0, Math.PI * 2); ctx.fill();
   }
   ctx.globalCompositeOperation = "source-over";
   for (const s of Object.values(STARS)) {  // labels last, only for what's active
     if (s.level < .15) continue;
-    ctx.font = `600 ${Math.round(G / 15)}px ui-sans-serif, system-ui, sans-serif`;
+    ctx.font = `600 ${Math.round(U / 15)}px ui-sans-serif, system-ui, sans-serif`;
     ctx.textAlign = s.x > .05 ? "left" : "right"; ctx.textBaseline = "middle";
-    ctx.shadowColor = "rgba(5,6,13,.95)"; ctx.shadowBlur = G / 25;
+    ctx.shadowColor = "rgba(5,6,13,.95)"; ctx.shadowBlur = U / 25;
     ctx.fillStyle = `rgba(240,242,255,${Math.min(1, s.level)})`;
-    ctx.fillText(`${s.name === "M42" ? "Orion Nebula" : s.name} · ${s.label}`, s.px + (s.x > .05 ? 1 : -1) * G / 14, s.py);
+    ctx.fillText(`${s.name === "M42" ? "Orion Nebula" : s.name} · ${s.label}`, s.px + (s.x > .05 ? 1 : -1) * U / 14, s.py);
     ctx.shadowBlur = 0;
   }
   requestAnimationFrame(frame);

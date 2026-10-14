@@ -23,13 +23,15 @@ STATIC = Path(__file__).with_name("static")
 
 
 class UIServer:
-    def __init__(self, on_command: Callable[[dict[str, Any]], Awaitable[None]], port: int = 8770) -> None:
+    def __init__(self, on_command: Callable[[dict[str, Any]], Awaitable[None]], port: int = 8770,
+                 on_first_connect: Callable[[], None] | None = None) -> None:
         self.port = port
         self.token = secrets.token_urlsafe(24)
         self._on_command = on_command
         self._clients: set[ServerConnection] = set()
         self._snapshot: dict[str, Any] = {}  # latest status, replayed to new tabs
         self._server: Any = None
+        self._on_first_connect = on_first_connect
 
     @property
     def url(self) -> str:
@@ -64,6 +66,9 @@ class UIServer:
 
     async def _handle(self, ws: ServerConnection) -> None:
         self._clients.add(ws)
+        if self._on_first_connect:
+            callback, self._on_first_connect = self._on_first_connect, None
+            callback()
         try:
             for msg in self._snapshot.values():
                 await ws.send(json.dumps(msg))
