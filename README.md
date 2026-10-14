@@ -1,6 +1,6 @@
 # OrionKit Core
 
-The free, MIT-licensed voice engine behind [OrionKit](https://orion-sage-seven.vercel.app): a local, low-latency,
+The free, MIT-licensed voice engine behind [OrionKit](https://orion-kit.com): a local, low-latency,
 full-duplex voice loop in Python.
 
 - **"Hey Orion" wake word** with no training: open-vocabulary keyword spotting (sherpa-onnx). openWakeWord models also work.
@@ -45,7 +45,7 @@ test_voice.py         live harness and headless self-test
 Pro adds the tri-model router (Ollama, Gemini, Claude) with circuit breakers and offline failover, the
 Nebula MCP agent tools (sandboxed shell, files, telemetry, Home Assistant), screen-aware vision, the live
 terminal dashboard, an offline license verifier, and commercial-use rights:
-[get OrionKit Pro](https://orion-sage-seven.vercel.app/#pricing).
+[get OrionKit Pro](https://orion-kit.com/#pricing).
 
 ## License
 
