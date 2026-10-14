@@ -107,7 +107,7 @@ class DuplexController:
             if self.state is State.SPEAKING:
                 if self._is_echo():
                     continue
-                self._barge_in()
+                self._barge_in("wake word")
             else:
                 self._seg.reset()  # discard the wake phrase itself so it never becomes a turn
                 if self.state is State.IDLE:
@@ -125,7 +125,7 @@ class DuplexController:
                         # Drop the echo segment so continued real speech raises a fresh SpeechStart.
                         self._seg.reset()
                         continue
-                    self._barge_in()
+                    self._barge_in("speech")
                 elif self.state is State.LISTENING:
                     self._deadline = None  # user is talking; don't time out mid-sentence
             elif isinstance(event, Utterance) and self.state is State.LISTENING:
@@ -175,6 +175,16 @@ class DuplexController:
         if not result.interrupted:  # barge-in already moved us to LISTENING
             self._set(State.LISTENING, self._cfg.followup_s)
 
+    async def announce(self, text: str) -> None:
+        """Speak something Orion starts on its own (a timer going off), after any reply in progress."""
+        while self.state in (State.THINKING, State.SPEAKING):
+            await asyncio.sleep(0.2)
+        self._emit("announce")
+        self._set(State.SPEAKING)
+        result = await self._tts.speak(text)
+        if not result.interrupted:
+            self._set(State.LISTENING, self._cfg.followup_s)
+
     def _is_echo(self) -> bool:
         if self._echo is None or not self._echo.is_echo():
             return False
@@ -182,11 +192,12 @@ class DuplexController:
         log.debug("speech during playback matched the speaker output (%.2f): ignored", self._echo.last_similarity)
         return True
 
-    def _barge_in(self) -> None:
+    def _barge_in(self, cause: str = "speech") -> None:
+        sim = self._echo.last_similarity if self._echo else float("nan")
         self._tts.interrupt()  # cancels token consumption + synthesis, flushes the speaker
         self._set(State.LISTENING)  # keep capturing: the interrupting speech is the next turn
         self._emit("barge_in")
-        log.info("barge-in")
+        log.info("barge-in by %s (echo similarity %.2f, vad %.2f)", cause, sim, self._seg.last_prob)
 
     # ---- helpers ------------------------------------------------------------------------------
 

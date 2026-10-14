@@ -85,7 +85,13 @@ _SPOKEN_UNITS = ((re.compile(r"\s?°\s?F\b"), " degrees Fahrenheit"), (re.compil
                  (re.compile(r"(?<=\d)\s?km/h\b"), " kilometers per hour"))
 
 
+_LINK = re.compile(r"\[([^\]]+)\]\((?:https?://)?[^)\s]+\)")
+_URL = re.compile(r"https?://(?:www\.)?([^/\s)]+)[^\s)]*")
+
+
 def _clean(text: str) -> str:
+    text = _LINK.sub(r"\1", text)   # [Python.org](https://...) -> Python.org
+    text = _URL.sub(r"\1", text)    # bare URLs -> just the site name
     text = _MARKDOWN.sub("", text)
     for pattern, spoken in _SPOKEN_UNITS:  # say units the way a person would
         text = pattern.sub(spoken, text)

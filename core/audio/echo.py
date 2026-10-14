@@ -56,6 +56,7 @@ class EchoGate:
         self._window_s, self._max_lag_s = window_s, max_lag_s
         self.threshold = threshold
         self.last_similarity = 0.0
+        self.last_levels = (0.0, 0.0)  # (mic rms, speaker rms) of the last check
 
     def is_echo(self) -> bool:
         """True when the recent mic audio is explained by recent playback."""
@@ -65,4 +66,6 @@ class EchoGate:
             self.last_similarity = 0.0
             return False  # nothing was playing: whatever the mic hears is not our echo
         self.last_similarity = echo_similarity(mic, ref, self._max_lag_s)
+        self.last_levels = (float(np.sqrt(np.mean((mic.astype(np.float32) / 32768) ** 2))),
+                            float(np.sqrt(np.mean((ref.astype(np.float32) / 32768) ** 2))))
         return self.last_similarity >= self.threshold
