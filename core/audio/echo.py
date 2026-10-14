@@ -50,7 +50,8 @@ def echo_similarity(mic: np.ndarray, ref: np.ndarray, max_lag_s: float = 0.3) ->
 
 
 class EchoGate:
-    def __init__(self, mic: MicStream, player: AudioPlayer, window_s: float = 0.6, max_lag_s: float = 0.3, threshold: float = 0.72) -> None:
+    # max_lag 0.5 s: a MacBook Pro measured ~225 ms speaker-to-mic delay (CoreAudio input latency ~315 ms).
+    def __init__(self, mic: MicStream, player: AudioPlayer, window_s: float = 0.6, max_lag_s: float = 0.5, threshold: float = 0.72) -> None:
         self._mic, self._player = mic, player
         self._window_s, self._max_lag_s = window_s, max_lag_s
         self.threshold = threshold
