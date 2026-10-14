@@ -80,8 +80,16 @@ class SentenceSplitter:
         return word in _ABBREVIATIONS or (len(word) == 1 and word.isalpha())
 
 
+_SPOKEN_UNITS = ((re.compile(r"\s?°\s?F\b"), " degrees Fahrenheit"), (re.compile(r"\s?°\s?C\b"), " degrees Celsius"),
+                 (re.compile(r"°"), " degrees"), (re.compile(r"(?<=\d)\s?mph\b"), " miles per hour"),
+                 (re.compile(r"(?<=\d)\s?km/h\b"), " kilometers per hour"))
+
+
 def _clean(text: str) -> str:
-    return " ".join(_MARKDOWN.sub("", text).split())
+    text = _MARKDOWN.sub("", text)
+    for pattern, spoken in _SPOKEN_UNITS:  # say units the way a person would
+        text = pattern.sub(spoken, text)
+    return " ".join(text.split())
 
 
 class AudioPlayer:
