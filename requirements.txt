@@ -1,0 +1,10 @@
+numpy>=1.26
+scipy>=1.11
+sounddevice>=0.5
+onnxruntime>=1.18
+openwakeword==0.6.0
+sherpa-onnx>=1.12
+sentencepiece>=0.2
+faster-whisper>=1.1
+kokoro-onnx>=0.4
+ollama>=0.6
