@@ -1,0 +1,110 @@
+"""Orion's features: what's free, what's Pro, what's switched on and how to set each one up.
+
+One list drives the orb UI's Features panel, the terminal dashboard's hotkeys and `python main.py --features`.
+Settings are written to the project's .env (owner-only), so they survive restarts.
+"""
+from __future__ import annotations
+
+import os
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+from core.config import PROJECT_ROOT
+
+ENV_FILE = PROJECT_ROOT / ".env"
+UPGRADE_URL = "https://orion-kit.com/#pricing"
+
+
+@dataclass(frozen=True)
+class Field:
+    env: str
+    label: str
+    secret: bool = True
+    placeholder: str = ""
+
+
+@dataclass(frozen=True)
+class Feature:
+    id: str
+    name: str
+    description: str
+    star: str                     # constellation star that represents it
+    pro: bool
+    kind: str                     # info | toggle | keys | addon | pair
+    env: str | None = None        # toggle: the env var holding "1"/"0"
+    default_on: bool = False
+    fields: tuple[Field, ...] = field(default_factory=tuple)
+    how: str = ""
+
+
+FEATURES: tuple[Feature, ...] = (
+    Feature("voice", "Voice & “Hey Orion”", "Wake word, barge-in and on-device speech.", "Meissa", False, "info"),
+    Feature("followup", "Follow-up mode", "One short window after each reply where you don't need the wake word.", "Meissa", False,
+            "toggle", env="ORIONKIT_FOLLOWUP"),
+    Feature("local", "Local model", "Private, offline answers on your own machine through Ollama.", "Mintaka", False, "info"),
+    Feature("claude", "Claude", "Deep reasoning, coding and multi-step work.", "Alnitak", True, "keys",
+            fields=(Field("ANTHROPIC_API_KEY", "Anthropic API key", placeholder="sk-ant-…"),),
+            how="Create a key at console.anthropic.com → API keys."),
+    Feature("gemini", "Gemini", "Fast answers, screen reading and quick multi-tool requests.", "Alnilam", True, "keys",
+            fields=(Field("GEMINI_API_KEY", "Gemini API key", placeholder="AIza…"),), how="Create a key at aistudio.google.com/apikey."),
+    Feature("web", "Web access", "Search the web and read pages.", "Rigel", True, "toggle", env="ORIONKIT_WEB", default_on=True),
+    Feature("tools", "Weather, timers & system", "Live weather, timers and reminders, sandboxed shell, files and system stats.",
+            "M42", True, "info"),
+    Feature("home_assistant", "Home Assistant", "Control 3,000+ smart-home brands, including Google Nest and Alexa devices.",
+            "M42", True, "keys", fields=(Field("HA_URL", "Home Assistant URL", secret=False, placeholder="http://homeassistant.local:8123"),
+                                       Field("HA_TOKEN", "Long-lived access token")),
+            how="In Home Assistant: your profile → Security → Long-lived access tokens → Create."),
+    Feature("smartthings", "SmartThings", "Samsung SmartThings plus Matter, Zigbee and Z-Wave devices on its hub.", "M42", True, "keys",
+            fields=(Field("SMARTTHINGS_TOKEN", "Personal access token"),),
+            how="Create a token at account.smartthings.com/tokens (devices: read and execute)."),
+    Feature("hue", "Philips Hue", "Lights on your local Hue bridge.", "M42", True, "pair",
+            fields=(Field("HUE_APP_KEY", "Hue key"),), how="Run: python tools/hue_pair.py, then press the button on your bridge."),
+    Feature("memory", "Long-term memory", "Remembers facts and preferences across conversations.", "Saiph", True, "addon"),
+    Feature("browser", "Browser control", "Opens sites, clicks, types and fills forms in a real browser.", "Saiph", True, "addon"),
+    Feature("notion", "Notion", "Search, read and edit your Notion pages.", "Saiph", True, "addon",
+            fields=(Field("NOTION_TOKEN", "Notion integration secret"),), how="Create an internal integration at notion.so/profile/integrations."),
+    Feature("git", "Git", "Status, diffs and history for your workspace repository.", "Saiph", True, "addon"),
+)
+BY_ID = {f.id: f for f in FEATURES}
+
+
+def is_on(f: Feature, installed_addons: set[str] | None = None) -> bool:
+    if f.kind == "info":
+        return True
+    if f.kind == "toggle":
+        return os.environ.get(f.env or "", "1" if f.default_on else "0") == "1"
+    if f.kind == "addon":
+        return f.id in (installed_addons or set())
+    return all(os.environ.get(x.env) for x in f.fields)
+
+
+def describe(licensed: bool, installed_addons: set[str] | None = None) -> list[dict[str, Any]]:
+    out = []
+    for f in FEATURES:
+        locked = f.pro and not licensed
+        on = (not locked) and is_on(f, installed_addons)
+        status = "locked" if locked else ("on" if on else ("off" if f.kind == "toggle" else "set up"))
+        out.append({"id": f.id, "name": f.name, "description": f.description, "star": f.star, "pro": f.pro, "kind": f.kind,
+                    "locked": locked, "on": on, "status": status, "how": f.how,
+                    "fields": [{"env": x.env, "label": x.label, "secret": x.secret, "placeholder": x.placeholder} for x in f.fields]})
+    return out
+
+
+_KEY = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
+
+
+def save_env(updates: dict[str, str]) -> None:
+    """Set KEY=VALUE pairs in .env (owner-only file) and in this process."""
+    for k, v in updates.items():
+        if not _KEY.match(k) or "\n" in v or "\r" in v:
+            raise ValueError(f"invalid setting {k!r}")
+    lines = ENV_FILE.read_text().splitlines() if ENV_FILE.is_file() else []
+    kept = [ln for ln in lines if ln.split("=", 1)[0].strip() not in updates]
+    kept += [f"{k}={v}" for k, v in updates.items()]
+    tmp = ENV_FILE.with_suffix(".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write("\n".join(kept) + "\n")
+    os.replace(tmp, ENV_FILE)
+    os.environ.update(updates)

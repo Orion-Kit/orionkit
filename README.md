@@ -16,8 +16,9 @@ full-duplex voice loop in Python.
 ```sh
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 ./scripts/download_models.sh                 # ~450 MB of voice models
-ollama pull qwen2.5:3b                       # or any chat model
-.venv/bin/python voice_chat.py               # say "Hey Orion"
+ollama pull qwen3:4b-instruct                       # or any chat model
+.venv/bin/python voice_chat.py               # opens the orb window; say "Hey Orion"
+.venv/bin/python voice_chat.py --terminal    # prefer the terminal
 ```
 
 Check everything headlessly (no mic needed):

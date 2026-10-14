@@ -8,3 +8,4 @@ sentencepiece>=0.2
 faster-whisper>=1.1
 kokoro-onnx>=0.4
 ollama>=0.6
+websockets>=16
