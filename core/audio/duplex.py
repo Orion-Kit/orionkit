@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
@@ -44,6 +45,12 @@ class DuplexConfig:
     barge_in_min_ms: int = 300       # confirmed speech needed to interrupt
     idle_threshold: float = 0.5
     idle_min_ms: int = 160
+    # Second-chance wake: short phrases heard while idle are transcribed and checked for the name.
+    # Catches accents and mics the keyword spotter misses; also lets "Hey Orion, <request>" run in one go.
+    stt_wake: bool = True
+    stt_wake_max_s: float = 6.0
+    stt_wake_pattern: str = (r"^\W*(?:(?:hey|hi|hello|ok(?:ay)?|hail|yo)[\s,]+)?"
+                             r"(?:orion|orian|o'?ryan|oreon|aryan)(?:'s|s)?\b[\s,.!?]*(.*)$")
 
 
 @dataclass(frozen=True)
@@ -123,6 +130,9 @@ class DuplexController:
                     self._deadline = None  # user is talking; don't time out mid-sentence
             elif isinstance(event, Utterance) and self.state is State.LISTENING:
                 await self._handle_utterance(event)
+            elif isinstance(event, Utterance) and self.state is State.IDLE and self._cfg.stt_wake \
+                    and event.duration_s <= self._cfg.stt_wake_max_s:
+                await self._stt_wake(event)
 
     async def _timeout_loop(self) -> None:
         while True:
@@ -132,6 +142,22 @@ class DuplexController:
                 self._emit("timeout")
 
     # ---- turn handling ------------------------------------------------------------------------
+
+    async def _stt_wake(self, utt: Utterance) -> None:
+        transcript = await self._stt.transcribe(utt.audio)
+        m = re.match(self._cfg.stt_wake_pattern, transcript.text, re.I)
+        if not m or self.state is not State.IDLE:  # not addressed to us, or the keyword spotter already woke
+            return
+        self._emit("wake")
+        log.info("wake via transcript %r", transcript.text)
+        request = m.group(1).strip()
+        if len(request.split()) >= 2:  # "Hey Orion, what's the weather?": answer straight away
+            rest = Transcript(request, transcript.latency_ms, transcript.audio_s)
+            self._emit("transcript", transcript=rest)
+            self._reply = asyncio.create_task(self._speak(request))
+        else:
+            self._seg.reset()
+            self._set(State.LISTENING, self._cfg.listen_timeout_s)
 
     async def _handle_utterance(self, utt: Utterance) -> None:
         self._set(State.THINKING)

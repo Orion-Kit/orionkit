@@ -77,8 +77,8 @@ class KeywordWakeDetector:
         self,
         mic: MicStream,
         phrase: str = DEFAULT_MODEL,
-        threshold: float = 0.2,  # 10/10 synthetic voices, 0/100 lookalike phrases at 0.15-0.2
-        boost: float = 1.5,
+        threshold: float = 0.05,  # tuned on a real MacBook mic + human voice (synthetic voices alone over-fit)
+        boost: float = 2.0,
         cooldown_s: float = 1.5,
         model_dir: Path = KWS_DIR,
     ) -> None:
@@ -114,11 +114,20 @@ class KeywordWakeDetector:
         self._name = phrase.lower()
         self.events: asyncio.Queue[WakeEvent] = asyncio.Queue()
 
-    @staticmethod
-    def spellings(phrase: str, sp: object) -> list[str]:
-        """BPE token spellings of the phrase, plus the common mishearing of the name ("Orian")."""
-        variants = {phrase.upper(), phrase.upper().replace("ORION", "ORIAN")}
-        return sorted({" ".join(sp.encode_as_pieces(v)) for v in variants})  # type: ignore[attr-defined]
+    # Ways the acoustic model spells "Orion" across accents; also accepted alone ("Orion, ...").
+    ORION_SPELLINGS = ("▁OR ION", "▁OR I ON", "▁O ▁RI ON", "▁O R I ON", "▁OR IAN", "▁OR I AN", "▁O ▁RI AN", "▁A R ION")
+
+    @classmethod
+    def spellings(cls, phrase: str, sp: object) -> list[str]:
+        """BPE token spellings of the phrase. For "... orion" phrases, every common spelling of the name too."""
+        base = {" ".join(sp.encode_as_pieces(phrase.upper()))}  # type: ignore[attr-defined]
+        words = phrase.upper().split()
+        if words and words[-1] == "ORION":
+            prefix = " ".join(sp.encode_as_pieces(" ".join(words[:-1]))) if len(words) > 1 else ""  # type: ignore[attr-defined]
+            for name in cls.ORION_SPELLINGS:
+                base.add(f"{prefix} {name}".strip())
+                base.add(name)
+        return sorted(base)
 
     def _feed(self, frame: np.ndarray) -> bool:
         x = frame.astype(np.float32) / 32768.0
@@ -157,4 +166,4 @@ def create_wake(mic: MicStream, spec: str = DEFAULT_MODEL, threshold: float | No
     """A phrase ("hey orion") uses the keyword spotter; a model name or .onnx/.tflite path uses openWakeWord."""
     if spec.endswith((".onnx", ".tflite")) or "_" in spec:
         return WakeWordDetector(mic, spec, 0.5 if threshold is None else threshold)
-    return KeywordWakeDetector(mic, spec, 0.2 if threshold is None else threshold)
+    return KeywordWakeDetector(mic, spec, 0.05 if threshold is None else threshold)
