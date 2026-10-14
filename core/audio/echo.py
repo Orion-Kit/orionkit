@@ -57,6 +57,9 @@ class EchoGate:
         self.threshold = threshold
         self.last_similarity = 0.0
         self.last_levels = (0.0, 0.0)  # (mic rms, speaker rms) of the last check
+        self.borderline = 0.5           # below the threshold but above this, judge by loudness too
+        self.louder_than_echo = 1.6     # a real interruption is at least this much louder than the echo
+        self._coupling: float | None = None
 
     def is_echo(self) -> bool:
         """True when the recent mic audio is explained by recent playback."""
@@ -65,7 +68,16 @@ class EchoGate:
         if np.sqrt(np.mean((ref.astype(np.float32) / 32768) ** 2)) < 1e-3:
             self.last_similarity = 0.0
             return False  # nothing was playing: whatever the mic hears is not our echo
-        self.last_similarity = echo_similarity(mic, ref, self._max_lag_s)
-        self.last_levels = (float(np.sqrt(np.mean((mic.astype(np.float32) / 32768) ** 2))),
-                            float(np.sqrt(np.mean((ref.astype(np.float32) / 32768) ** 2))))
-        return self.last_similarity >= self.threshold
+        self.last_similarity = sim = echo_similarity(mic, ref, self._max_lag_s)
+        mic_rms = float(np.sqrt(np.mean((mic.astype(np.float32) / 32768) ** 2)))
+        ref_rms = float(np.sqrt(np.mean((ref.astype(np.float32) / 32768) ** 2)))
+        self.last_levels = (mic_rms, ref_rms)
+        ratio = mic_rms / max(ref_rms, 1e-4)
+        if sim >= self.threshold:
+            # Confident echo: learn how loud the speaker sounds at the mic (room, volume and mic dependent).
+            self._coupling = ratio if self._coupling is None else 0.9 * self._coupling + 0.1 * ratio
+            return True
+        if sim >= self.borderline and self._coupling is not None:
+            # Borderline match: someone talking over Orion makes the mic louder than its echo alone would.
+            return ratio <= self._coupling * self.louder_than_echo
+        return False

@@ -107,6 +107,10 @@ class SpeechSegmenter:
     def min_speech_ms(self, ms: int) -> None:
         self._start_frames = max(1, round(ms / self._ms_per_frame))
 
+    @property
+    def in_speech(self) -> bool:
+        return self._in_speech
+
     def reset(self) -> None:
         """Drop any partial utterance (used after wake / barge-in to start a clean turn)."""
         self._vad.reset()

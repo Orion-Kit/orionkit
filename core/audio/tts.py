@@ -237,6 +237,18 @@ class TTSEngine:
         assert sr == TTS_SAMPLE_RATE
         return audio
 
+    def chime(self, kind: str) -> None:
+        """Short soft two-note cue: rising when Orion starts listening, falling when it stops."""
+        if self._player.playing:
+            return
+        notes = (660.0, 990.0) if kind == "start" else (880.0, 587.0)
+        sr = TTS_SAMPLE_RATE
+        n = int(sr * 0.07)
+        t = np.arange(n) / sr
+        env = np.sin(np.pi * np.arange(n) / n) ** 2  # smooth attack/release, no clicks
+        tone = np.concatenate([0.12 * np.sin(2 * np.pi * f * t) * env for f in notes]).astype(np.float32)
+        self._player.enqueue(tone)
+
     def interrupt(self) -> None:
         """Barge-in: stop consuming tokens, abandon pending synthesis, silence the speaker."""
         self._interrupted = True

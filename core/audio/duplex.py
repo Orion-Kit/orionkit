@@ -15,7 +15,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from enum import Enum
 
@@ -40,7 +40,13 @@ class State(Enum):
 @dataclass(frozen=True)
 class DuplexConfig:
     listen_timeout_s: float = 8.0   # after wake, give up if nobody speaks
-    followup_s: float = 6.0         # after a reply, keep listening without the wake word
+    # Follow-up mode (off by default): one fixed window after a reply where the next request needs no wake word.
+    # Background speech can't hold it open, and follow-ups are only answered if they're meant for Orion.
+    followup: bool = False
+    followup_s: float = 5.0
+    chime: bool = True              # soft tones when Orion starts and stops listening
+    end_pattern: str = (r"^\W*(thanks?( you)?( so much)?|cheers|that'?s (all|it|everything)|never ?mind|nothing|no thanks?|"
+                        r"stop|cancel|goodbye|bye|that will be all|i'?m good|all good)\b[\w\s,.!']{0,20}$")
     barge_in_threshold: float = 0.8  # VAD threshold while Orion is talking
     barge_in_min_ms: int = 300       # confirmed speech needed to interrupt
     idle_threshold: float = 0.5
@@ -73,6 +79,7 @@ class DuplexController:
         wake: "WakeWordDetector | KeywordWakeDetector | None" = None,
         config: DuplexConfig = DuplexConfig(),
         echo_gate: EchoGate | None = None,
+        addressed: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self._seg = segmenter
         self._stt = stt
@@ -81,6 +88,9 @@ class DuplexController:
         self._wake = wake
         self._cfg = config
         self._echo = echo_gate
+        self._addressed = addressed
+        self.followup = config.followup  # can be toggled at runtime (UI)
+        self._in_followup = False  # LISTENING because a reply just ended, not because of the wake word
         self.state = State.IDLE if wake else State.LISTENING
         self.events: asyncio.Queue[TurnEvent] = asyncio.Queue()
         self._deadline: float | None = None
@@ -111,7 +121,9 @@ class DuplexController:
             else:
                 self._seg.reset()  # discard the wake phrase itself so it never becomes a turn
                 if self.state is State.IDLE:
-                    self._set(State.LISTENING, self._cfg.listen_timeout_s)
+                    self._start_listening()
+                else:
+                    self._in_followup = False  # the wake word makes a follow-up explicit
             self._emit("wake")
             log.info("wake %s %.2f", event.model, event.score)
 
@@ -126,8 +138,9 @@ class DuplexController:
                         self._seg.reset()
                         continue
                     self._barge_in("speech")
-                elif self.state is State.LISTENING:
-                    self._deadline = None  # user is talking; don't time out mid-sentence
+                elif self.state is State.LISTENING and not self._in_followup:
+                    self._deadline = None  # user is talking to us; don't time out mid-sentence
+                # In a follow-up window the deadline stays fixed: background chatter can't keep it open.
             elif isinstance(event, Utterance) and self.state is State.LISTENING:
                 await self._handle_utterance(event)
             elif isinstance(event, Utterance) and self.state is State.IDLE and self._cfg.stt_wake \
@@ -138,8 +151,9 @@ class DuplexController:
         while True:
             await asyncio.sleep(0.1)
             if self.state is State.LISTENING and self._deadline and time.monotonic() > self._deadline:
-                self._set(State.IDLE)
-                self._emit("timeout")
+                if self._in_followup and self._seg.in_speech:
+                    continue  # they started inside the window: let them finish the sentence
+                self._stop_listening("timeout")
 
     # ---- turn handling ------------------------------------------------------------------------
 
@@ -157,23 +171,56 @@ class DuplexController:
             self._reply = asyncio.create_task(self._speak(request))
         else:
             self._seg.reset()
-            self._set(State.LISTENING, self._cfg.listen_timeout_s)
+            self._start_listening()
 
     async def _handle_utterance(self, utt: Utterance) -> None:
+        followup = self._in_followup
         self._set(State.THINKING)
         transcript = await self._stt.transcribe(utt.audio)
-        if not transcript.text:
-            self._set(State.LISTENING, self._cfg.followup_s)
+        text = transcript.text.strip()
+        if not text:
+            self._stop_listening("nothing heard")
+            return
+        if re.match(self._cfg.end_pattern, text, re.I):
+            self._emit("transcript", transcript=transcript)
+            self._stop_listening("dismissed")
+            return
+        if followup and self._addressed is not None and not await self._addressed(text):
+            log.info("follow-up not meant for Orion, ignored: %r", text)
+            self._stop_listening("not addressed")
             return
         self._emit("transcript", transcript=transcript)
-        self._reply = asyncio.create_task(self._speak(transcript.text))
+        self._reply = asyncio.create_task(self._speak(text))
+
+    def talk(self) -> None:
+        """Tap-to-talk (UI button / orb click): like saying the wake word."""
+        if self.state is State.SPEAKING:
+            self._barge_in("tap")
+        elif self.state is State.IDLE:
+            self._seg.reset()
+            self._start_listening()
+        self._emit("wake")
+
+    def stop(self) -> None:
+        """Stop talking now and go back to waiting for the wake word."""
+        if self.state is State.SPEAKING:
+            self._tts.interrupt()
+        self._stop_listening("stopped")
+
+    async def submit_text(self, text: str) -> None:
+        """A typed request (from the UI): handled like speech, interrupting any reply in progress."""
+        if self.state is State.SPEAKING:
+            self._tts.interrupt()
+        self._emit("transcript", transcript=Transcript(text, 0.0, 0.0))
+        self._reply = asyncio.create_task(self._speak(text))
 
     async def _speak(self, text: str) -> None:
+        self._in_followup = False
         self._set(State.SPEAKING)
         result = await self._tts.speak(self._respond(text))
         self._emit("reply", result=result)
         if not result.interrupted:  # barge-in already moved us to LISTENING
-            self._set(State.LISTENING, self._cfg.followup_s)
+            self._after_reply()
 
     async def announce(self, text: str) -> None:
         """Speak something Orion starts on its own (a timer going off), after any reply in progress."""
@@ -183,7 +230,7 @@ class DuplexController:
         self._set(State.SPEAKING)
         result = await self._tts.speak(text)
         if not result.interrupted:
-            self._set(State.LISTENING, self._cfg.followup_s)
+            self._after_reply()
 
     def _is_echo(self) -> bool:
         if self._echo is None or not self._echo.is_echo():
@@ -195,9 +242,39 @@ class DuplexController:
     def _barge_in(self, cause: str = "speech") -> None:
         sim = self._echo.last_similarity if self._echo else float("nan")
         self._tts.interrupt()  # cancels token consumption + synthesis, flushes the speaker
-        self._set(State.LISTENING)  # keep capturing: the interrupting speech is the next turn
+        self._in_followup = False  # interrupting is talking to Orion
+        self._set(State.LISTENING, self._cfg.listen_timeout_s)  # keep capturing: the interruption is the next turn
         self._emit("barge_in")
         log.info("barge-in by %s (echo similarity %.2f, vad %.2f)", cause, sim, self._seg.last_prob)
+
+    # ---- listening windows --------------------------------------------------------------------
+
+    def _start_listening(self) -> None:
+        self._in_followup = False
+        self._set(State.LISTENING, self._cfg.listen_timeout_s)
+        self._chime("start")
+
+    def _after_reply(self) -> None:
+        if self.followup and self._wake:
+            self._in_followup = True
+            self._set(State.LISTENING, self._cfg.followup_s)
+        else:
+            self._stop_listening("reply finished")
+
+    def _stop_listening(self, why: str) -> None:
+        self._in_followup = False
+        if not self._wake:  # no wake word configured: always listening
+            self._set(State.LISTENING)
+            return
+        self._seg.reset()
+        self._set(State.IDLE)
+        self._chime("end")
+        self._emit("timeout")
+        log.info("back to wake-word-only (%s)", why)
+
+    def _chime(self, kind: str) -> None:
+        if self._cfg.chime:
+            self._tts.chime(kind)
 
     # ---- helpers ------------------------------------------------------------------------------
 

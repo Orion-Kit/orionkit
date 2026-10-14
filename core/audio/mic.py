@@ -65,6 +65,7 @@ class MicStream:
         self._stream = None
         self._carry = np.zeros(0, dtype=np.int16)
         self.rms: float = 0.0  # level of the most recent frame (0..1)
+        self.muted = False     # privacy mute: capture continues, but everyone downstream hears silence
 
     def subscribe(self) -> asyncio.Queue[np.ndarray]:
         q: asyncio.Queue[np.ndarray] = asyncio.Queue(self._queue_frames)
@@ -113,6 +114,8 @@ class MicStream:
         self._loop.call_soon_threadsafe(self._ingest, indata[:, 0].copy())
 
     def _ingest(self, samples: np.ndarray) -> None:
+        if self.muted:
+            samples = np.zeros_like(samples)
         self._ring.write(samples)
         data = np.concatenate([self._carry, samples]) if len(self._carry) else samples
         n_frames = len(data) // FRAME_SAMPLES
