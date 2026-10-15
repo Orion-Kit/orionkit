@@ -127,6 +127,9 @@ class UIServer:
         for ws in list(self._audio_clients):
             asyncio.ensure_future(self._safe_send(ws, pcm16))
 
+    def forget(self, keep: str) -> None:
+        self._snapshot.pop(keep, None)
+
     def send(self, msg: dict[str, Any], keep: str | None = None) -> None:
         """Broadcast to every open tab. ``keep`` stores it as the latest of its kind for tabs that open later."""
         if keep:

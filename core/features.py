@@ -31,7 +31,7 @@ class Feature:
     description: str
     star: str                     # constellation star that represents it
     pro: bool
-    kind: str                     # info | toggle | keys | addon | pair
+    kind: str                     # info | toggle | keys | addon | pair | mcp_add
     env: str | None = None        # toggle: the env var holding "1"/"0"
     default_on: bool = False
     fields: tuple[Field, ...] = field(default_factory=tuple)
@@ -49,8 +49,10 @@ FEATURES: tuple[Feature, ...] = (
     Feature("gemini", "Gemini", "Fast answers, screen reading and quick multi-tool requests.", "Alnilam", True, "keys",
             fields=(Field("GEMINI_API_KEY", "Gemini API key", placeholder="AIza…"),), how="Create a key at aistudio.google.com/apikey."),
     Feature("web", "Web access", "Search the web and read pages.", "Rigel", True, "toggle", env="ORIONKIT_WEB", default_on=True),
-    Feature("tools", "Weather, timers & system", "Live weather, timers and reminders, sandboxed shell, files and system stats.",
-            "M42", True, "info"),
+    Feature("tools", "Weather, reminders & system", "Live weather, timers and reminders that survive restarts, sandboxed shell, "
+            "files and system stats.", "M42", True, "info"),
+    Feature("documents", "Draft documents", "Say “draft a … ” and Orion writes it and saves it as Word, PDF or Markdown in "
+            "your Documents folder.", "M42", True, "info"),
     Feature("home_assistant", "Home Assistant", "Control 3,000+ smart-home brands, including Google Nest and Alexa devices.",
             "M42", True, "keys", fields=(Field("HA_URL", "Home Assistant URL", secret=False, placeholder="http://homeassistant.local:8123"),
                                        Field("HA_TOKEN", "Long-lived access token")),
@@ -67,6 +69,10 @@ FEATURES: tuple[Feature, ...] = (
     Feature("notion", "Notion", "Search, read and edit your Notion pages.", "Saiph", True, "addon",
             fields=(Field("NOTION_TOKEN", "Notion integration secret"),), how="Create an internal integration at notion.so/profile/integrations."),
     Feature("git", "Git", "Status, diffs and history for your workspace repository.", "Saiph", True, "addon"),
+    Feature("mcp", "Add an MCP server", "Plug in any Model Context Protocol server: its tools become Orion's tools.", "Saiph", True,
+            "mcp_add", fields=(Field("MCP_NAME", "Name", secret=False, placeholder="Name, e.g. linear"),
+                               Field("MCP_TARGET", "URL or command", secret=False, placeholder="https://…/mcp  or  npx -y @scope/server")),
+            how="Paste the server's URL, or the command that starts it."),
 )
 BY_ID = {f.id: f for f in FEATURES}
 
@@ -78,18 +84,27 @@ def is_on(f: Feature, installed_addons: set[str] | None = None) -> bool:
         return os.environ.get(f.env or "", "1" if f.default_on else "0") == "1"
     if f.kind == "addon":
         return f.id in (installed_addons or set())
+    if f.kind == "mcp_add":
+        return False
     return all(os.environ.get(x.env) for x in f.fields)
 
 
-def describe(licensed: bool, installed_addons: set[str] | None = None) -> list[dict[str, Any]]:
+def describe(licensed: bool, installed_addons: set[str] | None = None,
+             custom_servers: dict[str, int] | None = None) -> list[dict[str, Any]]:
+    """Every feature for the UI. ``custom_servers``: user-added MCP servers (name -> tool count), listed after "Add"."""
     out = []
     for f in FEATURES:
         locked = f.pro and not licensed
         on = (not locked) and is_on(f, installed_addons)
-        status = "locked" if locked else ("on" if on else ("off" if f.kind == "toggle" else "set up"))
+        status = "locked" if locked else ("on" if on else ("off" if f.kind == "toggle" else "add" if f.kind == "mcp_add" else "set up"))
         out.append({"id": f.id, "name": f.name, "description": f.description, "star": f.star, "pro": f.pro, "kind": f.kind,
                     "locked": locked, "on": on, "status": status, "how": f.how,
                     "fields": [{"env": x.env, "label": x.label, "secret": x.secret, "placeholder": x.placeholder} for x in f.fields]})
+        if f.id == "mcp" and licensed:
+            for name, n in sorted((custom_servers or {}).items()):
+                out.append({"id": f"mcp:{name}", "name": f"MCP · {name}", "description": f"{n} tool{'s' * (n != 1)} · tap to remove",
+                            "star": "Saiph", "pro": True, "kind": "mcp_installed", "locked": False, "on": True, "status": "on",
+                            "how": "", "fields": []})
     return out
 
 

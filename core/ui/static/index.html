@@ -123,7 +123,8 @@
   .sheet-head .close-drawer { order: 0; }
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
   .tile { text-align: left; padding: 14px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,.02);
-    display: flex; flex-direction: column; gap: 6px; min-height: 118px; transition: border-color .15s, background .15s; }
+    display: flex; flex-direction: column; gap: 6px; min-height: 118px; transition: border-color .15s, background .15s; cursor: pointer; }
+  .tile .setup { cursor: default; }
   .tile:hover { border-color: #343a5e; background: rgba(139,92,246,.06); }
   .tile .top { display: flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
   .tile .star { width: 9px; height: 9px; border-radius: 50%; flex: none; box-shadow: 0 0 10px currentColor; }
@@ -144,6 +145,21 @@
   .pay h2 { font-size: 22px; margin: 4px 0 6px; }
   .pay ul { text-align: left; margin: 16px auto; padding: 0; list-style: none; display: grid; gap: 6px; max-width: 360px; font-size: 13.5px; }
   .pay li::before { content: "✦ "; color: var(--magenta); }
+  .report textarea { width: 100%; min-height: 90px; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: #080a15; color: var(--text); font: inherit; resize: vertical; }
+  .report pre { max-height: 260px; overflow: auto; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: #080a15; font: 11.5px/1.45 ui-monospace, Menlo, monospace; white-space: pre-wrap; color: var(--dim); }
+  .report label { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--dim); }
+  .banner { position: relative; z-index: 3; display: flex; align-items: center; gap: 10px; margin: 0 auto; width: min(760px, 94vw);
+    padding: 10px 14px; border-radius: 14px; border: 1px solid rgba(196,181,253,.3); background: rgba(24,18,48,.92); font-size: 13.5px; }
+  .banner b { color: #f5d0fe; } .banner .spacer { flex: 1; }
+  .banner button.link { color: var(--cyan); text-decoration: underline; }
+  .quick { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; position: relative; z-index: 2; margin-top: 8px; }
+  .quick button { padding: 6px 12px; border-radius: 999px; border: 1px solid rgba(196,181,253,.28); background: rgba(139,92,246,.1); font-size: 12.5px; color: #e9d5ff; }
+  .quick button:hover { background: rgba(139,92,246,.22); }
+  .quick .x { border: 0; background: none; color: var(--dim); padding: 6px 4px; }
+  .wizard .steps { display: grid; gap: 10px; margin: 14px 0; text-align: left; }
+  .wizard .step { display: flex; gap: 12px; align-items: center; padding: 12px 14px; border: 1px solid var(--line); border-radius: 14px; cursor: pointer; }
+  .wizard .step:hover { border-color: #343a5e; background: rgba(139,92,246,.06); }
+  .wizard .step small { display: block; color: var(--dim); }
   .price { font-size: 34px; font-weight: 700; margin: 6px 0 0; }
 </style>
 </head>
@@ -159,11 +175,13 @@
     <span class="pill" id="plan" hidden></span>
     <button class="icon-btn" id="features-btn" aria-haspopup="dialog">Features</button>
     <button class="icon-btn" id="terminal-btn" title="Switch to the terminal dashboard (remembered for next time)">Terminal</button>
+    <button class="icon-btn" id="report-btn" aria-haspopup="dialog" title="Report a problem">Report</button>
     <button class="icon-btn" id="drawer-btn" aria-expanded="false" aria-controls="drawer">Details</button>
   </header>
 
   <main>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <div class="banner" id="banner" role="status" hidden></div>
     <div class="spacer-orb"></div>
     <canvas id="orb" role="img" aria-label="Orion's orb: it brightens when listening, swirls when thinking and pulses when speaking"></canvas>
     <div class="state" id="state" aria-live="polite">Starting…</div>
@@ -172,6 +190,7 @@
       <div id="you"></div>
       <div id="say" aria-live="polite"></div>
     </div>
+    <div class="quick" id="quick" hidden></div>
   </main>
 
   <footer>
@@ -204,7 +223,7 @@
     <div class="pill" style="margin:0 auto">OrionKit Pro</div>
     <h2 id="pay-title">Unlock <span id="pay-feature">this feature</span></h2>
     <p style="color:var(--dim);margin:0">Free covers voice and the local model. Pro unlocks the rest of the constellation.</p>
-    <ul><li>Claude and Gemini with automatic failover</li><li>Web search, weather, timers and system tools</li>
+    <ul><li>Claude and Gemini with automatic failover</li><li>Web, weather, reminders, documents and system tools</li>
       <li>Home Assistant, SmartThings and Philips Hue</li><li>Memory, browser control, Notion and Git add-ons</li>
       <li>Lifetime updates and commercial use</li></ul>
     <div class="price">$99 <span style="font-size:14px;color:var(--dim);font-weight:500">one-time</span></div>
@@ -217,6 +236,32 @@
       <button class="btn primary" type="submit">Activate</button>
       <div class="msgline" id="pay-msg" role="status" aria-live="polite"></div>
     </form>
+  </div>
+</div>
+<div class="modal" id="report" role="dialog" aria-modal="true" aria-labelledby="report-title" hidden>
+  <div class="sheet report">
+    <div class="sheet-head"><h2 id="report-title">Report a problem</h2><div class="spacer"></div>
+      <button class="close-drawer" data-close-modal aria-label="Close">✕</button></div>
+    <form id="report-form" class="setup">
+      <textarea id="report-text" placeholder="What happened? What did you expect?" aria-label="What happened"></textarea>
+      <label><input type="checkbox" id="report-conv"> Include this conversation</label>
+      <div class="how">Before anything is sent you'll see exactly what's in the report. Keys, tokens and your user name are removed.</div>
+      <div><button class="btn" type="submit">Preview</button></div>
+    </form>
+    <div id="report-preview" hidden>
+      <pre id="report-body"></pre>
+      <div style="display:flex;gap:8px;margin-top:10px"><button class="btn primary" id="report-send">Send report</button><button class="btn" id="report-back">Edit</button></div>
+    </div>
+    <div class="msgline" id="report-msg" role="status" aria-live="polite"></div>
+  </div>
+</div>
+<div class="modal" id="wizard" role="dialog" aria-modal="true" aria-labelledby="wizard-title" hidden>
+  <div class="sheet pay wizard">
+    <div class="sheet-head"><div class="spacer"></div><button class="close-drawer" data-close-modal aria-label="Close">✕</button></div>
+    <h2 id="wizard-title">Welcome to Orion</h2>
+    <p style="color:var(--dim);margin:0">Say “Hey Orion”, or type below. Connect a few things to get the most out of it:</p>
+    <div class="steps" id="wizard-steps"></div>
+    <button class="btn primary" data-close-modal>Start talking</button>
   </div>
 </div>
 <div id="scrim" hidden></div>
@@ -338,7 +383,8 @@ function handle(m) {
       remoteAudio.flush();
       break;
     case "features":
-      featureItems = m.items; licensed = m.licensed; renderFeatures(); renderPlan();
+      featureItems = m.items; licensed = m.licensed; renderFeatures(); renderPlan(); renderQuick();
+      if (!$("#wizard").hidden) renderWizard();
       break;
     case "feature_result": {
       const line = document.querySelector(`[data-msg="${CSS.escape(m.id)}"]`);
@@ -351,6 +397,24 @@ function handle(m) {
       break;
     case "activate_result":
       $("#pay-msg").textContent = m.message; $("#pay-msg").className = "msgline " + (m.ok ? "good" : "bad");
+      break;
+    case "report_preview":
+      $("#report-body").textContent = m.report; $("#report-form").hidden = true; $("#report-preview").hidden = false;
+      $("#report-msg").textContent = ""; $("#report-send").disabled = false;
+      break;
+    case "report_result":
+      $("#report-msg").textContent = m.message.split("\n")[0]; $("#report-msg").className = "msgline " + (m.ok ? "good" : "bad");
+      if (m.mailto) { const a = document.createElement("a"); a.href = m.mailto; a.textContent = " Email it"; a.style.color = "var(--cyan)"; $("#report-msg").appendChild(a); }
+      if (m.ok) setTimeout(closeModals, 2500);
+      break;
+    case "notice":
+      showBanner(m);
+      break;
+    case "quick_hide":
+      quickHidden = true; $("#quick").hidden = true;
+      break;
+    case "onboard":
+      if (!sessionStorage.getItem("onboarded")) { sessionStorage.setItem("onboarded", "1"); openWizard(); }
       break;
     case "switching":
       switched = true;
@@ -441,12 +505,12 @@ $("#plan").addEventListener("click", () => { if (!licensed) openPaywall(null); }
 function renderFeatures() {
   $("#feature-grid").innerHTML = featureItems.map((f) => {
     const chip = f.locked ? `<span class="chip locked">🔒 Pro</span>` : f.status === "on" ? `<span class="chip on">On</span>`
-      : f.kind === "toggle" ? `<span class="chip">Off</span>` : `<span class="chip setup">Set up</span>`;
-    const setup = openSetup === f.id && !f.locked && (f.kind === "keys" || f.kind === "addon" || f.kind === "pair") ? `
+      : f.kind === "toggle" ? `<span class="chip">Off</span>` : f.kind === "mcp_add" ? `<span class="chip setup">＋ Add</span>` : `<span class="chip setup">Set up</span>`;
+    const setup = openSetup === f.id && !f.locked && (f.kind === "keys" || f.kind === "addon" || f.kind === "pair" || f.kind === "mcp_add") ? `
       <form class="setup" data-setup="${esc(f.id)}">
         ${f.fields.map((x) => `<input name="${esc(x.env)}" type="${x.secret ? "password" : "text"}" placeholder="${esc(x.placeholder || x.label)}" aria-label="${esc(x.label)}" autocomplete="off">`).join("")}
         ${f.how ? `<div class="how">${esc(f.how)}</div>` : ""}
-        ${f.kind !== "pair" ? `<button class="btn primary" type="submit">${f.kind === "addon" ? "Install" : "Save"}</button>` : ""}
+        ${f.kind !== "pair" ? `<button class="btn primary" type="submit">${f.kind === "addon" ? "Install" : f.kind === "mcp_add" ? "Test & add" : "Save"}</button>` : ""}
         <div class="msgline" data-msg="${esc(f.id)}" role="status" aria-live="polite"></div>
       </form>` : "";
     return `<div class="tile ${f.locked ? "locked" : ""}" data-feature="${esc(f.id)}" role="button" tabindex="0" aria-label="${esc(f.name)}: ${esc(f.status)}">
@@ -461,6 +525,7 @@ function activateTile(id) {
   if (f.locked) { openPaywall(id); return; }
   if (f.kind === "toggle") { send({ t: "feature", id, on: !f.on }); return; }
   if (f.kind === "info") { toast(`${f.name} is built in and always on.`); return; }
+  if (f.kind === "mcp_installed") { if (confirm(`Remove the ${f.name.replace("MCP · ", "")} server?`)) send({ t: "feature", id, on: false }); return; }
   openSetup = openSetup === id ? null : id; renderFeatures();
   const first = document.querySelector(`[data-setup="${CSS.escape(id)}"] input`); if (first) first.focus();
 }
@@ -476,7 +541,7 @@ $("#feature-grid").addEventListener("submit", (e) => {
   e.preventDefault();
   const form = e.target, id = form.dataset.setup, values = {};
   for (const input of form.querySelectorAll("input")) if (input.value.trim()) values[input.name] = input.value.trim();
-  form.querySelector("[data-msg]").textContent = "Working…";
+  form.querySelector("[data-msg]").textContent = form.dataset.setup === "mcp" ? "Starting the server and listing its tools…" : "Working…";
   send({ t: "feature", id, values });
 });
 function openModal(id) { $(id).hidden = false; const c = $(id).querySelector("[data-close-modal]"); c && c.focus(); }
@@ -502,6 +567,65 @@ $("#orb").addEventListener("click", () => send({ t: live.state === "speaking" ? 
 $("#stop").addEventListener("click", () => send({ t: "stop" }));
 $("#mute").addEventListener("click", (e) => send({ t: "mute", on: e.currentTarget.getAttribute("aria-pressed") !== "true" }));
 $("#followup").addEventListener("click", (e) => send({ t: "followup", on: e.currentTarget.getAttribute("aria-pressed") !== "true" }));
+$("#report-btn").addEventListener("click", () => {
+  $("#report-form").hidden = false; $("#report-preview").hidden = true; $("#report-msg").textContent = "";
+  openModal("#report"); $("#report-text").focus();
+});
+$("#report-form").addEventListener("submit", (e) => {
+  e.preventDefault(); $("#report-msg").textContent = "Collecting…"; $("#report-msg").className = "msgline";
+  send({ t: "report_preview", text: $("#report-text").value, conversation: $("#report-conv").checked });
+});
+$("#report-back").addEventListener("click", () => { $("#report-form").hidden = false; $("#report-preview").hidden = true; });
+$("#report-send").addEventListener("click", () => {
+  $("#report-send").disabled = true; $("#report-msg").textContent = "Sending…"; $("#report-msg").className = "msgline";
+  send({ t: "report_send", report: $("#report-body").textContent });
+});
+
+/* "What's new" after an update, "update available" otherwise */
+function showBanner(m) {
+  const b = $("#banner");
+  b.innerHTML = m.kind === "whatsnew"
+    ? `<span>✦ <b>What's new in ${esc(m.version)}</b> · ${esc(m.notes)}</span><span class="spacer"></span>`
+    : `<span>✦ <b>OrionKit ${esc(m.version)} is available.</b> Quit Orion and run <code>python main.py --update</code></span><span class="spacer"></span>`;
+  const x = document.createElement("button"); x.className = "close-drawer"; x.setAttribute("aria-label", "Dismiss"); x.textContent = "✕";
+  x.addEventListener("click", () => { b.hidden = true; send({ t: "notice_seen", kind: m.kind, version: m.version }); });
+  b.appendChild(x); b.hidden = false;
+}
+
+/* quick-connect chips for the big integrations that aren't set up yet */
+const QUICK = [["claude", "Connect Claude"], ["gemini", "Connect Gemini"], ["home_assistant", "Connect smart home"], ["mcp", "Add an MCP server"]];
+let quickHidden = false;
+function renderQuick() {
+  const todo = QUICK.filter(([id]) => { const f = featureItems.find((x) => x.id === id); return f && f.status !== "on" && id !== "mcp"; });
+  const q = $("#quick");
+  q.hidden = quickHidden || !todo.length;
+  q.innerHTML = todo.map(([id, label]) => `<button data-quick="${id}">＋ ${label}</button>`).join("") + `<button class="x" data-quick-x aria-label="Hide these">✕</button>`;
+}
+function openFeature(id) {
+  const f = featureItems.find((x) => x.id === id);
+  if (f && f.locked) { openPaywall(id); return; }
+  closeModals(); openSetup = id; renderFeatures(); openModal("#features");
+  const tile = document.querySelector(`[data-feature="${CSS.escape(id)}"]`); if (tile) tile.scrollIntoView({ block: "center" });
+  const first = document.querySelector(`[data-setup="${CSS.escape(id)}"] input`); if (first) first.focus();
+}
+$("#quick").addEventListener("click", (e) => {
+  if (e.target.closest("[data-quick-x]")) { quickHidden = true; $("#quick").hidden = true; send({ t: "quick_hide" }); return; }
+  const b = e.target.closest("[data-quick]"); if (b) openFeature(b.dataset.quick);
+});
+
+/* first-run welcome */
+const WIZARD = [["claude", "Claude or Gemini", "Smarter answers and tools. Bring your own key."], ["home_assistant", "Smart home", "Home Assistant, Google Nest, Alexa devices, Hue, SmartThings."],
+  ["web", "Web access", "Search and read the web."], ["companion", "Your phone", "Use Orion from your phone or another browser."]];
+function renderWizard() {
+  $("#wizard-steps").innerHTML = WIZARD.map(([id, name, d]) => {
+    const f = featureItems.find((x) => x.id === id), st = !f ? "" : f.locked ? "🔒 Pro" : f.status === "on" ? "✓ On" : "Set up";
+    return `<div class="step" data-step="${id}" role="button" tabindex="0"><div style="flex:1"><b>${esc(name)}</b><small>${esc(d)}</small></div><span class="chip ${f && f.status === "on" ? "on" : f && f.locked ? "locked" : "setup"}">${st}</span></div>`;
+  }).join("");
+}
+function openWizard() { renderWizard(); openModal("#wizard"); }
+$("#wizard-steps").addEventListener("click", (e) => { const s = e.target.closest("[data-step]"); if (s) openFeature(s.dataset.step); });
+$("#wizard-steps").addEventListener("keydown", (e) => { const s = e.target.closest("[data-step]"); if (s && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); openFeature(s.dataset.step); } });
+
 function setDrawer(open) {
   $("#drawer").classList.toggle("open", open);
   $("#scrim").hidden = !open;

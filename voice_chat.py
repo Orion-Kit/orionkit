@@ -119,6 +119,14 @@ async def orb(args: argparse.Namespace, brain: LocalBrain) -> None:
             else:
                 ui.send({"t": "paywall", "id": cmd.get("id")})
             ui.send(features_msg(), keep="features")
+        elif kind == "report_preview":
+            from core import bugreport
+            ui.send({"t": "report_preview", "report": await asyncio.to_thread(bugreport.collect, str(cmd.get("text", ""))[:5000])})
+        elif kind == "report_send":
+            from core import bugreport
+            ok, message = await asyncio.to_thread(bugreport.send, bugreport.redact(str(cmd.get("report", ""))), None)
+            ui.send({"t": "report_result", "ok": ok, "message": message,
+                     "mailto": next((x for x in message.split("\n") if x.startswith("mailto:")), None)})
         elif kind == "upgrade":
             webbrowser.open(UPGRADE_URL)
         elif kind == "activate":
