@@ -60,6 +60,8 @@ FEATURES: tuple[Feature, ...] = (
             how="Create a token at account.smartthings.com/tokens (devices: read and execute)."),
     Feature("hue", "Philips Hue", "Lights on your local Hue bridge.", "M42", True, "pair",
             fields=(Field("HUE_APP_KEY", "Hue key"),), how="Run: python tools/hue_pair.py, then press the button on your bridge."),
+    Feature("companion", "Phone & browser companion", "Use Orion from your phone or any browser, privately over Tailscale.",
+            "Meissa", True, "info", how="Run: python main.py --remote"),
     Feature("memory", "Long-term memory", "Remembers facts and preferences across conversations.", "Saiph", True, "addon"),
     Feature("browser", "Browser control", "Opens sites, clicks, types and fills forms in a real browser.", "Saiph", True, "addon"),
     Feature("notion", "Notion", "Search, read and edit your Notion pages.", "Saiph", True, "addon",

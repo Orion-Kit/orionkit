@@ -9,7 +9,7 @@ import re
 import threading
 import time
 from collections import deque
-from collections.abc import AsyncIterable, AsyncIterator, Iterator
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -104,7 +104,9 @@ class AudioPlayer:
     ``device=False`` runs headless: audio is consumed in real time and kept in ``captured`` (tests).
     """
 
-    def __init__(self, sample_rate: int = TTS_SAMPLE_RATE, device: Optional[int | str | bool] = None, block_ms: int = 20) -> None:
+    def __init__(self, sample_rate: int = TTS_SAMPLE_RATE, device: Optional[int | str | bool] = None, block_ms: int = 20,
+                 capture: bool = False) -> None:
+        """``device=False`` plays to nobody locally: blocks go to ``sink`` (a remote browser) and/or ``captured`` (tests)."""
         self.sample_rate = sample_rate
         self._device = device
         self._block = sample_rate * block_ms // 1000
@@ -117,6 +119,9 @@ class AudioPlayer:
         self._stream = None
         self._headless: Optional[asyncio.Task[None]] = None
         self.captured: list[np.ndarray] = []
+        self._capture = capture or device is False
+        self.sink: Optional[Callable[[np.ndarray], None]] = None      # receives every played block (remote playback)
+        self.on_flush: Optional[Callable[[], None]] = None           # told when playback is cut (barge-in)
         self.rms = 0.0  # level of the most recent output block
         # What actually went to the speaker, at the mic's 16 kHz, for echo detection.
         self.reference = RingBuffer(int(SAMPLE_RATE * 2.0))
@@ -158,6 +163,8 @@ class AudioPlayer:
             self._chunks.clear()
             self._offset = 0
         self._idle.set()
+        if self.on_flush:
+            self.on_flush()
 
     async def drain(self) -> None:
         await self._idle.wait()
@@ -192,7 +199,10 @@ class AudioPlayer:
             playing = self.playing
             block = self._pull(self._block)  # always pull, like a sound card, so the echo reference stays current
             if playing:
-                self.captured.append(block)
+                if self._capture and self.sink is None:  # tests; a remote player streams instead of keeping audio
+                    self.captured.append(block)
+                if self.sink:
+                    self.sink(block)
 
 
 @dataclass(frozen=True)

@@ -2,7 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Orion">
+<meta name="theme-color" content="#05060d">
 <title>Orion · OrionKit</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3CradialGradient id='g'%3E%3Cstop offset='0' stop-color='%23d946ef'/%3E%3Cstop offset='1' stop-color='%234f46e5'/%3E%3C/radialGradient%3E%3C/defs%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='url(%23g)' stroke-width='3'/%3E%3C/svg%3E">
 <style>
@@ -88,6 +95,25 @@
   .kv span:nth-child(odd) { color: var(--dim); }
   h3 { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); margin: 6px 0 10px; font-weight: 600; }
   @media (prefers-reduced-motion: reduce) { #say .cursor { animation: none; } }
+
+  /* Companion devices: tap to start audio (browsers need a tap before using the mic and speaker) */
+  #start-audio { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: rgba(5,6,13,.55); backdrop-filter: blur(4px); }
+  #start-audio button { padding: 16px 26px; border-radius: 16px; font-size: 17px; font-weight: 600; color: #fff;
+    background: linear-gradient(135deg, var(--blue), var(--magenta)); box-shadow: 0 10px 40px -10px rgba(217,70,239,.7); }
+  #start-audio p { color: var(--dim); text-align: center; margin: 12px 0 0; font-size: 13px; }
+
+  /* Phones */
+  @media (max-width: 680px) {
+    header { padding: max(10px, env(safe-area-inset-top)) 12px 8px; gap: 6px; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
+    header::-webkit-scrollbar { display: none; }
+    #conn, #brain { display: none !important; }
+    .icon-btn { padding: 6px 9px; font-size: 12px; flex: none; }
+    #say { font-size: 16px; }
+    .captions { min-height: 70px; }
+    footer { padding: 10px 10px max(14px, env(safe-area-inset-bottom)); }
+    .grid { grid-template-columns: 1fr; }
+    .sheet { padding: 16px; max-height: 92vh; }
+  }
 
   .modal { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; background: rgba(5,6,13,.62); backdrop-filter: blur(6px); padding: 20px; }
   .sheet { width: min(860px, 100%); max-height: 86vh; overflow-y: auto; background: rgba(12,13,26,.97); border: 1px solid var(--line);
@@ -194,6 +220,7 @@
   </div>
 </div>
 <div id="scrim" hidden></div>
+<div id="start-audio" hidden><div><button id="start-audio-btn">Tap to talk to Orion</button><p>Uses this device's microphone and speaker.</p></div></div>
 <aside id="drawer" aria-label="Details">
   <div class="tabs" role="tablist">
     <button class="close-drawer" id="close-drawer" aria-label="Close details">✕</button>
@@ -215,11 +242,56 @@ const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
 /* ---------------- connection ---------------- */
 let ws, live = { state: "idle", mic: 0, out: 0 }, switched = false;
 function connect() {
-  ws = new WebSocket(`ws://${location.host}/ws?t=${encodeURIComponent(token)}`);
-  ws.onopen = () => setConn(true);
+  ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?t=${encodeURIComponent(token)}`);
+  ws.binaryType = "arraybuffer";
+  ws.onopen = () => { setConn(true); if (remoteAudio.started) send({ t: "audio_hello" }); };
   ws.onclose = () => { if (switched) return; setConn(false); setTimeout(connect, 1500); };
-  ws.onmessage = (e) => handle(JSON.parse(e.data));
+  ws.onmessage = (e) => { if (typeof e.data === "string") handle(JSON.parse(e.data)); else remoteAudio.play(e.data); };
 }
+
+/* ---------------- companion audio: this device's mic and speaker ---------------- */
+const remoteAudio = {
+  started: false, ctx: null, next: 0, sources: [],
+  async start() {
+    this.ctx = this.ctx || new (window.AudioContext || window.webkitAudioContext)();
+    await this.ctx.resume();
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } });
+    // Worklet: downsample whatever the device records to 16 kHz int16 frames of 512 samples (32 ms).
+    const code = `class Down extends AudioWorkletProcessor {
+      constructor() { super(); this.ratio = sampleRate / 16000; this.acc = 0; this.buf = new Int16Array(512); this.n = 0; }
+      process(inputs) {
+        const ch = inputs[0][0]; if (!ch) return true;
+        for (let i = 0; i < ch.length; i++) {
+          this.acc += 1; if (this.acc < this.ratio) continue; this.acc -= this.ratio;
+          const v = Math.max(-1, Math.min(1, ch[i])); this.buf[this.n++] = v < 0 ? v * 32768 : v * 32767;
+          if (this.n === 512) { this.port.postMessage(this.buf.buffer.slice(0)); this.n = 0; }
+        }
+        return true;
+      } }
+      registerProcessor("down16k", Down);`;
+    await this.ctx.audioWorklet.addModule(URL.createObjectURL(new Blob([code], { type: "text/javascript" })));
+    const node = new AudioWorkletNode(this.ctx, "down16k");
+    node.port.onmessage = (e) => { if (ws && ws.readyState === 1) ws.send(e.data); };
+    this.ctx.createMediaStreamSource(stream).connect(node);
+    this.started = true; this.next = 0;
+    send({ t: "audio_hello" });
+  },
+  play(buffer) {  // Orion's voice: int16 mono at 24 kHz, scheduled back to back
+    if (!this.ctx) return;
+    const pcm = new Int16Array(buffer), f = new Float32Array(pcm.length);
+    for (let i = 0; i < pcm.length; i++) f[i] = pcm[i] / 32768;
+    const ab = this.ctx.createBuffer(1, f.length, 24000); ab.copyToChannel(f, 0);
+    const src = this.ctx.createBufferSource(); src.buffer = ab; src.connect(this.ctx.destination);
+    const t = Math.max(this.ctx.currentTime + .05, this.next); src.start(t); this.next = t + ab.duration;
+    this.sources.push(src); src.onended = () => { this.sources = this.sources.filter((x) => x !== src); };
+  },
+  flush() { for (const s of this.sources) { try { s.stop(); } catch {} } this.sources = []; this.next = 0; },
+};
+$("#start-audio-btn").addEventListener("click", async () => {
+  try { await remoteAudio.start(); $("#start-audio").hidden = true; }
+  catch (e) { $("#start-audio p").textContent = "Couldn't use the microphone: " + e.message + " (it needs HTTPS or this computer's own browser)."; }
+});
+if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
 const send = (msg) => ws && ws.readyState === 1 && ws.send(JSON.stringify(msg));
 function setConn(ok) {
   $("#conn-dot").style.background = ok ? "var(--ok)" : "var(--bad)";
@@ -260,6 +332,10 @@ function handle(m) {
       break;
     case "status":
       renderStatus(m);
+      if (m.remote_audio && !remoteAudio.started) $("#start-audio").hidden = false;
+      break;
+    case "audio_flush":
+      remoteAudio.flush();
       break;
     case "features":
       featureItems = m.items; licensed = m.licensed; renderFeatures(); renderPlan();
