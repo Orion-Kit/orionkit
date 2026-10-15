@@ -292,7 +292,15 @@ function connect() {
   ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws?t=${encodeURIComponent(token)}`);
   ws.binaryType = "arraybuffer";
   ws.onopen = () => { setConn(true); if (remoteAudio.started) send({ t: "audio_hello" }); };
-  ws.onclose = () => { if (switched) return; setConn(false); setTimeout(connect, 1500); };
+  ws.onclose = async (e) => {
+    if (switched) return;
+    if (e.code === 4000) { closedWindow("Orion has quit", "Start it again from your terminal."); return; }
+    setConn(false);
+    // A newer Orion started (new access code): this window is stale. Close it, or say so if the browser won't.
+    const alive = await fetch(`/alive?t=${encodeURIComponent(token)}`, { cache: "no-store" }).then((r) => r.status).catch(() => 0);
+    if (alive === 410) { staleWindow(); return; }
+    setTimeout(connect, 1500);
+  };
   ws.onmessage = (e) => { if (typeof e.data === "string") handle(JSON.parse(e.data)); else remoteAudio.play(e.data); };
 }
 
@@ -339,6 +347,13 @@ $("#start-audio-btn").addEventListener("click", async () => {
   catch (e) { $("#start-audio p").textContent = "Couldn't use the microphone: " + e.message + " (it needs HTTPS or this computer's own browser)."; }
 });
 if ("serviceWorker" in navigator && location.protocol === "https:") navigator.serviceWorker.register("sw.js").catch(() => {});
+function closedWindow(title, note) {
+  switched = true; document.title = "Orion (closed)"; window.close();  // retitled: Orion only ever raises its live window
+  document.body.innerHTML = `<div style="height:100%;display:grid;place-items:center;text-align:center;padding:24px">
+    <div><div style="font-size:22px;font-weight:600">${esc(title)}</div>
+    <p style="color:var(--dim);margin:10px 0 0">${esc(note)}</p></div></div>`;
+}
+const staleWindow = () => closedWindow("Orion restarted in a new window", "You can close this one.");
 const send = (msg) => ws && ws.readyState === 1 && ws.send(JSON.stringify(msg));
 function setConn(ok) {
   $("#conn-dot").style.background = ok ? "var(--ok)" : "var(--bad)";

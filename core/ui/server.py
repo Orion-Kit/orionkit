@@ -56,6 +56,11 @@ class UIServer:
         self._server = await serve(self._handle, "127.0.0.1", self.port, process_request=self._http, max_size=256 * 1024)
 
     async def stop(self) -> None:
+        for ws in list(self._clients):  # tell open windows Orion has quit, so they close instead of reconnecting
+            try:
+                await asyncio.wait_for(ws.close(code=4000, reason="orion-quit"), 1)
+            except Exception:
+                pass
         if self._server:
             self._server.close()
             await self._server.wait_closed()
@@ -71,6 +76,10 @@ class UIServer:
             if urlparse(origin).netloc not in hosts:  # same-origin only: the page we served, nobody else
                 return connection.respond(HTTPStatus.FORBIDDEN, "cross-origin\n")
             return None  # proceed with the WebSocket handshake
+        if path == "/alive":  # an old window asking whether it still belongs to the Orion that's running
+            query = request.path.partition("?")[2]
+            ok = secrets.compare_digest(dict(p.partition("=")[::2] for p in query.split("&")).get("t", ""), self.token)
+            return connection.respond(HTTPStatus.OK if ok else HTTPStatus.GONE, "ok\n" if ok else "replaced\n")
         if path in FILES:
             name, ctype = FILES[path]
             body = (STATIC / name).read_bytes()
