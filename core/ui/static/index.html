@@ -387,8 +387,8 @@ function handle(m) {
       if (!$("#wizard").hidden) renderWizard();
       break;
     case "feature_result": {
-      const line = document.querySelector(`[data-msg="${CSS.escape(m.id)}"]`);
-      if (line) { line.textContent = m.message; line.className = "msgline " + (m.ok ? "good" : "bad"); }
+      lastResult[m.id] = m;  // the features list re-renders right after: keep the message so it survives
+      showResult(m.id);
       if (m.ok) toast(m.message);
       break;
     }
@@ -443,6 +443,7 @@ function addMsg(who, text) {
   div.className = `msg ${who}`;
   div.innerHTML = `<div class="who">${who === "user" ? "You" : "Orion"}</div><div class="text">${esc(text)}</div>`;
   const panel = $("#conv"); panel.appendChild(div); panel.scrollTop = panel.scrollHeight;
+  while (panel.children.length > 300) panel.firstChild.remove();
 }
 function addActivity(kind, d) {
   const labels = {
@@ -494,6 +495,11 @@ $("#talk").addEventListener("click", () => send({ t: "talk" }));
 
 /* ---------------- features & upgrade ---------------- */
 let featureItems = [], licensed = true, openSetup = null;
+const lastResult = {};
+function showResult(id) {
+  const line = document.querySelector(`[data-msg="${CSS.escape(id)}"]`), m = lastResult[id];
+  if (line && m) { line.textContent = m.message; line.className = "msgline " + (m.ok ? "good" : "bad"); }
+}
 const STAR_COLOR = { Meissa: "#d6e2ff", Mintaka: "#c8d7ff", Alnilam: "#c8d7ff", Alnitak: "#c8d7ff", Rigel: "#aac8ff", M42: "#ec78ff", Saiph: "#c8d7ff", Betelgeuse: "#ff9e64", Bellatrix: "#bed2ff" };
 function renderPlan() {
   const p = $("#plan"); p.hidden = false;
@@ -505,8 +511,8 @@ $("#plan").addEventListener("click", () => { if (!licensed) openPaywall(null); }
 function renderFeatures() {
   $("#feature-grid").innerHTML = featureItems.map((f) => {
     const chip = f.locked ? `<span class="chip locked">🔒 Pro</span>` : f.status === "on" ? `<span class="chip on">On</span>`
-      : f.kind === "toggle" ? `<span class="chip">Off</span>` : f.kind === "mcp_add" ? `<span class="chip setup">＋ Add</span>` : `<span class="chip setup">Set up</span>`;
-    const setup = openSetup === f.id && !f.locked && (f.kind === "keys" || f.kind === "addon" || f.kind === "pair" || f.kind === "mcp_add") ? `
+      : f.kind === "toggle" ? `<span class="chip">Off</span>` : f.kind === "mcp_add" ? `<span class="chip setup">＋ Add</span>` : f.kind === "settings" ? `<span class="chip">Customize</span>` : `<span class="chip setup">Set up</span>`;
+    const setup = openSetup === f.id && !f.locked && (f.kind === "keys" || f.kind === "addon" || f.kind === "pair" || f.kind === "mcp_add" || f.kind === "settings") ? `
       <form class="setup" data-setup="${esc(f.id)}">
         ${f.fields.map((x) => `<input name="${esc(x.env)}" type="${x.secret ? "password" : "text"}" placeholder="${esc(x.placeholder || x.label)}" aria-label="${esc(x.label)}" autocomplete="off">`).join("")}
         ${f.how ? `<div class="how">${esc(f.how)}</div>` : ""}
@@ -517,6 +523,7 @@ function renderFeatures() {
       <div class="top"><span class="star" style="color:${STAR_COLOR[f.star] || "#fff"};background:${STAR_COLOR[f.star] || "#fff"}"></span>${esc(f.name)}${chip}</div>
       <p>${esc(f.description)}</p>${setup}</div>`;
   }).join("");
+  if (openSetup) showResult(openSetup);
 }
 function activateTile(id) {
   const f = featureItems.find((x) => x.id === id);
@@ -541,6 +548,7 @@ $("#feature-grid").addEventListener("submit", (e) => {
   e.preventDefault();
   const form = e.target, id = form.dataset.setup, values = {};
   for (const input of form.querySelectorAll("input")) if (input.value.trim()) values[input.name] = input.value.trim();
+  delete lastResult[id];
   form.querySelector("[data-msg]").textContent = form.dataset.setup === "mcp" ? "Starting the server and listing its tools…" : "Working…";
   send({ t: "feature", id, values });
 });
@@ -720,7 +728,12 @@ const DISTANT = [{ x: .10, y: .20, r: .055, rot: .5, col: [150, 130, 255] }, { x
 const PROCESS_ORDER = ["Betelgeuse", "Bellatrix", "Meissa", "Alnitak", "Alnilam", "Mintaka", "Rigel", "Saiph", "M42"];
 let processText = "";
 
+const FONTS = new Map();  // font strings by size: parsing a new font string per glyph is the costliest canvas call
+const monoFont = (px) => { const k = Math.round(px * 2) / 2; let f = FONTS.get(k); if (!f) FONTS.set(k, f = `${k}px ui-monospace, SFMono-Regular, Menlo, monospace`); return f; };
 function frame(now) {
+  // 30 fps at rest, 60 while Orion is busy; nothing at all in a background tab
+  const busy = live.state === "thinking" || live.state === "speaking" || live.state === "listening";
+  if (document.hidden || now - last < (busy ? 15 : 31)) { requestAnimationFrame(frame); return; }
   const dt = Math.min(.05, (now - last) / 1000); last = now;
   const target = STATES[live.muted ? "idle" : live.state] || STATES.idle;
   for (const k in target) cur[k] = lerp(cur[k], target[k], Math.min(1, dt * 4));
@@ -774,7 +787,7 @@ function frame(now) {
       const tw = .55 + .45 * Math.sin(now / 500 + p.seed * 40), rim = Math.min(1, Math.max(0, (2.3 - p.r) / .6));
       const alpha = Math.min(1, (.18 + .32 * cur.arms * tw) * (front ? 1 : .45) * (1.6 - p.r * .3) * rim);
       if (p.glyph && p.seed < .55) {
-        ctx.font = `${(U / 24 * (1.25 - p.r * .18)).toFixed(1)}px ui-monospace, SFMono-Regular, Menlo, monospace`;
+        ctx.font = monoFont(U / 24 * (1.25 - p.r * .18));
         ctx.fillStyle = `rgba(${col},${alpha * .85})`; ctx.fillText(p.ch, x, y);
       } else {
         const sz = (U / 190) * (1.5 - p.r * .28);

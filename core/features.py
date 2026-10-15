@@ -31,7 +31,7 @@ class Feature:
     description: str
     star: str                     # constellation star that represents it
     pro: bool
-    kind: str                     # info | toggle | keys | addon | pair | mcp_add
+    kind: str                     # info | toggle | keys | settings | addon | pair | mcp_add
     env: str | None = None        # toggle: the env var holding "1"/"0"
     default_on: bool = False
     fields: tuple[Field, ...] = field(default_factory=tuple)
@@ -42,6 +42,13 @@ FEATURES: tuple[Feature, ...] = (
     Feature("voice", "Voice & “Hey Orion”", "Wake word, barge-in and on-device speech.", "Meissa", False, "info"),
     Feature("followup", "Follow-up mode", "One short window after each reply where you don't need the wake word.", "Meissa", False,
             "toggle", env="ORIONKIT_FOLLOWUP"),
+    Feature("persona", "Voice & personality", "Choose Orion's voice, how fast it talks and its personality.", "Bellatrix", False,
+            "settings", fields=(Field("ORIONKIT_VOICE", "Voice", secret=False,
+                                      placeholder="Voice: bm_george, af_heart, am_michael, bf_emma… or a blend like bm_george:0.6,bm_fable:0.4"),
+                                Field("ORIONKIT_SPEED", "Speed", secret=False, placeholder="Speed: 1.0 (0.7 slower – 1.4 faster)"),
+                                Field("ORIONKIT_PERSONA", "Personality", secret=False,
+                                      placeholder="Personality: concise · friendly · dev pair · narrator · or describe it")),
+            how="Fill in any of these; leave the rest blank. Orion speaks a sample in the new voice."),
     Feature("local", "Local model", "Private, offline answers on your own machine through Ollama.", "Mintaka", False, "info"),
     Feature("claude", "Claude", "Deep reasoning, coding and multi-step work.", "Alnitak", True, "keys",
             fields=(Field("ANTHROPIC_API_KEY", "Anthropic API key", placeholder="sk-ant-…"),),
@@ -51,8 +58,12 @@ FEATURES: tuple[Feature, ...] = (
     Feature("web", "Web access", "Search the web and read pages.", "Rigel", True, "toggle", env="ORIONKIT_WEB", default_on=True),
     Feature("tools", "Weather, reminders & system", "Live weather, timers and reminders that survive restarts, sandboxed shell, "
             "files and system stats.", "M42", True, "info"),
-    Feature("documents", "Draft documents", "Say “draft a … ” and Orion writes it and saves it as Word, PDF or Markdown in "
-            "your Documents folder.", "M42", True, "info"),
+    Feature("documents", "Draft documents", "Say “draft a … ” and Orion writes it, saves it as Word, PDF or Markdown in its "
+            "workspace's Documents folder, and opens it.", "M42", True, "info"),
+    Feature("desktop", "Clipboard, apps & music", "“Rewrite what I copied”, “open Safari”, “next song”, “volume 30”: your "
+            "clipboard, apps, Spotify or Music and the volume.", "M42", True, "info"),
+    Feature("history", "Conversation history", "Remembers past conversations on this computer, so you can ask “what did I "
+            "ask about Docker last week?”.", "Saiph", True, "toggle", env="ORIONKIT_HISTORY", default_on=True),
     Feature("home_assistant", "Home Assistant", "Control 3,000+ smart-home brands, including Google Nest and Alexa devices.",
             "M42", True, "keys", fields=(Field("HA_URL", "Home Assistant URL", secret=False, placeholder="http://homeassistant.local:8123"),
                                        Field("HA_TOKEN", "Long-lived access token")),
@@ -86,6 +97,8 @@ def is_on(f: Feature, installed_addons: set[str] | None = None) -> bool:
         return f.id in (installed_addons or set())
     if f.kind == "mcp_add":
         return False
+    if f.kind == "settings":
+        return any(os.environ.get(x.env) for x in f.fields)
     return all(os.environ.get(x.env) for x in f.fields)
 
 
@@ -96,7 +109,8 @@ def describe(licensed: bool, installed_addons: set[str] | None = None,
     for f in FEATURES:
         locked = f.pro and not licensed
         on = (not locked) and is_on(f, installed_addons)
-        status = "locked" if locked else ("on" if on else ("off" if f.kind == "toggle" else "add" if f.kind == "mcp_add" else "set up"))
+        status = "locked" if locked else ("on" if on else ("off" if f.kind == "toggle" else "add" if f.kind == "mcp_add" else
+                                                              "customize" if f.kind == "settings" else "set up"))
         out.append({"id": f.id, "name": f.name, "description": f.description, "star": f.star, "pro": f.pro, "kind": f.kind,
                     "locked": locked, "on": on, "status": status, "how": f.how,
                     "fields": [{"env": x.env, "label": x.label, "secret": x.secret, "placeholder": x.placeholder} for x in f.fields]})
@@ -109,12 +123,13 @@ def describe(licensed: bool, installed_addons: set[str] | None = None,
 
 
 _KEY = re.compile(r"^[A-Z][A-Z0-9_]{1,63}$")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029]")
 
 
 def save_env(updates: dict[str, str]) -> None:
     """Set KEY=VALUE pairs in .env (owner-only file) and in this process."""
     for k, v in updates.items():
-        if not _KEY.match(k) or "\n" in v or "\r" in v:
+        if not _KEY.match(k) or _CONTROL.search(v):  # any line separator would let a value add other settings
             raise ValueError(f"invalid setting {k!r}")
     lines = ENV_FILE.read_text().splitlines() if ENV_FILE.is_file() else []
     kept = [ln for ln in lines if ln.split("=", 1)[0].strip() not in updates]

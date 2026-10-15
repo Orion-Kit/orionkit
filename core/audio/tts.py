@@ -5,6 +5,7 @@ Sentence N+1 is synthesized while sentence N plays, so time-to-first-audio is on
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 import threading
 import time
@@ -16,11 +17,11 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from scipy.signal import resample_poly
 
 from .mic import SAMPLE_RATE, RingBuffer
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
+log = logging.getLogger("orionkit.tts")
 TTS_SAMPLE_RATE = 24_000
 DEFAULT_VOICE = "bm_george:0.55,bm_fable:0.45"  # Orion's British blend
 
@@ -131,6 +132,9 @@ class AudioPlayer:
         return not self._idle.is_set()
 
     async def start(self) -> None:
+        # scipy costs ~0.9 s to import: TTSEngine loads it in its loader thread, so it's cached by now
+        from scipy.signal import resample_poly
+        self._resample = resample_poly
         self._loop = asyncio.get_running_loop()
         if self._device is False:
             self._headless = asyncio.create_task(self._headless_clock())
@@ -184,10 +188,16 @@ class AudioPlayer:
                     self._offset = 0
             empty = not self._chunks
         self.rms = float(np.sqrt(np.mean(out ** 2))) if filled else 0.0
-        self.reference.write((np.clip(resample_poly(out, 2, 3), -1, 1) * 32767).astype(np.int16))
+        self.reference.write((np.clip(self._resample(out, 2, 3), -1, 1) * 32767).astype(np.int16))
         if empty and self._loop is not None:
-            self._loop.call_soon_threadsafe(self._idle.set)
+            self._loop.call_soon_threadsafe(self._set_idle_if_empty)
         return out
+
+    def _set_idle_if_empty(self) -> None:
+        """Runs on the loop: audio queued since the audio thread saw an empty queue keeps drain() waiting."""
+        with self._lock:
+            if not self._chunks:
+                self._idle.set()
 
     def _callback(self, outdata: np.ndarray, frames: int, time_info: object, status: object) -> None:
         outdata[:, 0] = self._pull(frames)
@@ -222,10 +232,15 @@ class TTSEngine:
         model_path: Path = MODELS_DIR / "kokoro-v1.0.int8.onnx",
         voices_path: Path = MODELS_DIR / "voices-v1.0.bin",
     ) -> None:
+        import scipy.signal  # noqa: F401  (imported here, in the loader thread, for AudioPlayer.start)
         from kokoro_onnx import Kokoro
 
         self._kokoro = Kokoro(str(model_path), str(voices_path))
-        self._voice = self._blend(voice)
+        try:
+            self._voice = self._blend(voice)
+        except Exception:  # a typo in ORIONKIT_VOICE must not cost the user their voice
+            log.warning("unknown voice %r, using the default", voice)
+            self._voice = self._blend(DEFAULT_VOICE)
         self._lang = lang
         self._speed = speed
         self._player = player
@@ -233,6 +248,16 @@ class TTSEngine:
         self._job: Optional[asyncio.Task[SpeakResult]] = None
         self._interrupted = False
         self.synthesize("Ready.")  # warm-up
+
+    def voices(self) -> list[str]:
+        return list(self._kokoro.get_voices())
+
+    def configure(self, voice: str | None = None, speed: float | None = None) -> None:
+        """Change voice and speed from the next sentence on."""
+        if voice:
+            self._voice = self._blend(voice)
+        if speed:
+            self._speed = speed
 
     def _blend(self, spec: str) -> np.ndarray:
         """"bm_george:0.55,bm_fable:0.45" -> weighted style vector; a bare name means weight 1."""
@@ -301,7 +326,13 @@ class TTSEngine:
         count, first_ms = 0, None
         try:
             while (sentence := await sentences.get()) is not None:
-                pcm = await loop.run_in_executor(self._pool, self.synthesize, sentence)
+                if not re.search(r"\w", sentence):  # "---", "-", "…": nothing to say, and Kokoro rejects them
+                    continue
+                try:
+                    pcm = await loop.run_in_executor(self._pool, self.synthesize, sentence)
+                except ValueError as e:  # one unpronounceable chunk must not end the whole reply
+                    log.warning("skipped a chunk TTS couldn't voice (%s): %r", e, sentence[:60])
+                    continue
                 self._player.enqueue(pcm)
                 count += 1
                 if first_ms is None and started:

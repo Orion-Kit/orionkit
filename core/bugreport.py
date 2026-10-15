@@ -29,11 +29,20 @@ SECRETS = [
     (re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), "[token]"),
     (re.compile(r"(?i)(bearer|token|api[_-]?key|secret|password|authorization)([\"'=:\s]+)[^\s\"',]{8,}"), r"\1\2[redacted]"),
     (re.compile(r"(?i)\?t=[A-Za-z0-9_\-]{16,}"), "?t=[access-code]"),
+    (re.compile(r"\b(ntn|secret)_[A-Za-z0-9]{20,}"), "[notion-token]"), (re.compile(r"\bBSA[A-Za-z0-9_\-]{20,}"), "[brave-key]"),
+    (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "[email]"),
     (re.compile(r"/Users/[^/\s]+"), "/Users/[you]"), (re.compile(r"/home/[^/\s]+"), "/home/[you]"),
 ]
 
 
 def redact(text: str) -> str:
+    """Known key shapes, plus the live value of every secret setting (SmartThings, Hue and HA tokens have no shape)."""
+    from core.features import FEATURES
+    for f in FEATURES:
+        for x in f.fields:
+            value = os.environ.get(x.env, "")
+            if x.secret and len(value) >= 6:
+                text = text.replace(value, f"[{x.env.lower()}]")
     for pattern, repl in SECRETS:
         text = pattern.sub(repl, text)
     return text
@@ -65,7 +74,7 @@ def send(report: str, license_key: str | None) -> tuple[bool, str]:
         if r.status_code == 200:
             return True, f"Sent. Thanks! Reference {r.json().get('id', '')}. We'll reply by email if you added one."
         reason = r.json().get("detail", f"HTTP {r.status_code}") if r.headers.get("content-type", "").startswith("application/json") else f"HTTP {r.status_code}"
-    except httpx.HTTPError as e:
+    except (httpx.HTTPError, ValueError) as e:
         reason = type(e).__name__
     return False, save_local(report, reason)
 

@@ -31,6 +31,8 @@ if (STATIC / "_test_ask.wav").exists():  # end-to-end tests only; never shipped
 
 
 class UIServer:
+    SLOW = {"feature", "report_preview", "report_send", "activate", "upgrade"}
+
     def __init__(self, on_command: Callable[[dict[str, Any]], Awaitable[None]], port: int = 8770,
                  on_first_connect: Callable[[], None] | None = None, token: str | None = None,
                  on_audio: Callable[[bytes], None] | None = None) -> None:
@@ -40,6 +42,8 @@ class UIServer:
         self._audio_clients: set[ServerConnection] = set()  # devices whose mic/speaker Orion is using
         self._on_command = on_command
         self._clients: set[ServerConnection] = set()
+        self._pending: dict[ServerConnection, set[asyncio.Future[None]]] = {}
+        self._background: set[asyncio.Future[None]] = set()
         self._snapshot: dict[str, Any] = {}  # latest status, replayed to new tabs
         self._server: Any = None
         self._on_first_connect = on_first_connect
@@ -109,15 +113,24 @@ class UIServer:
                     self._audio_clients = {ws}  # the latest device to start audio owns the mic and speaker
                     continue
                 if isinstance(cmd, dict) and isinstance(cmd.get("t"), str):
-                    try:
-                        await self._on_command(cmd)
-                    except Exception:
-                        log.exception("UI command failed: %s", cmd.get("t"))
+                    if cmd["t"] in self.SLOW:  # installs and reports can take minutes: don't hold up "stop" or "talk"
+                        task = asyncio.ensure_future(self._run_command(cmd))
+                        self._background.add(task)
+                        task.add_done_callback(self._background.discard)
+                    else:
+                        await self._run_command(cmd)
         except ConnectionClosed:
             pass
         finally:
             self._clients.discard(ws)
             self._audio_clients.discard(ws)
+            self._pending.pop(ws, None)
+
+    async def _run_command(self, cmd: dict[str, Any]) -> None:
+        try:
+            await self._on_command(cmd)
+        except Exception:
+            log.exception("UI command failed: %s", cmd.get("t"))
 
     @property
     def audio_connected(self) -> bool:
@@ -125,7 +138,7 @@ class UIServer:
 
     def send_audio(self, pcm16: bytes) -> None:
         for ws in list(self._audio_clients):
-            asyncio.ensure_future(self._safe_send(ws, pcm16))
+            self._spawn(ws, pcm16)
 
     def forget(self, keep: str) -> None:
         self._snapshot.pop(keep, None)
@@ -137,8 +150,19 @@ class UIServer:
         if not self._clients:
             return
         data = json.dumps(msg, default=str)
+        droppable = msg.get("t") == "tick"
         for ws in list(self._clients):
-            asyncio.ensure_future(self._safe_send(ws, data))
+            self._spawn(ws, data, droppable)
+
+    def _spawn(self, ws: ServerConnection, data: str | bytes, droppable: bool = False) -> None:
+        """Send without blocking the caller. A slow client (a phone on a weak link) skips ticks rather than piling
+        up sends; anything else waits its turn, bounded by the socket's own write buffer."""
+        pending = self._pending.setdefault(ws, set())
+        if droppable and len(pending) > 4:
+            return
+        task = asyncio.ensure_future(self._safe_send(ws, data))
+        pending.add(task)
+        task.add_done_callback(pending.discard)
 
     async def _safe_send(self, ws: ServerConnection, data: str | bytes) -> None:
         try:
@@ -146,3 +170,6 @@ class UIServer:
         except ConnectionClosed:
             self._clients.discard(ws)
             self._audio_clients.discard(ws)
+            self._pending.pop(ws, None)
+        except Exception:
+            log.exception("UI send failed")

@@ -16,6 +16,8 @@ from collections.abc import AsyncIterator
 
 import ollama
 
+from core.persona import persona_prompt, voice_settings
+
 SYSTEM = ("You are Orion, a voice assistant. Your replies are spoken aloud: plain sentences, no markdown, "
           "short unless asked for depth. Latency-sensitive: begin your answer immediately.")
 
@@ -34,7 +36,7 @@ class LocalBrain:
         reply = ""
         try:
             stream = await self._client.chat(model=self._model, stream=True, keep_alive="30m",
-                                             messages=[{"role": "system", "content": SYSTEM}, *self._history])
+                                             messages=[{"role": "system", "content": SYSTEM + persona_prompt()}, *self._history])
             async for part in stream:
                 if part.message.content:
                     reply += part.message.content
@@ -61,7 +63,7 @@ async def voice(args: argparse.Namespace, brain: LocalBrain) -> None:
     mic, player = MicStream(device=args.input), AudioPlayer(device=args.output)
     print("Loading voice models…")
     wake = None if args.no_wake else create_wake(mic, args.wake)
-    duplex = DuplexController(SpeechSegmenter(mic), STTWorker(), TTSEngine(player), brain.respond, wake,
+    duplex = DuplexController(SpeechSegmenter(mic), STTWorker(), TTSEngine(player, **voice_settings()), brain.respond, wake,
                               DuplexConfig(), EchoGate(mic, player))
     async with mic:
         await player.start()
@@ -114,6 +116,16 @@ async def orb(args: argparse.Namespace, brain: LocalBrain) -> None:
                 d.followup = bool(cmd.get("on"))
                 save_env({"ORIONKIT_FOLLOWUP": "1" if d.followup else "0"})
                 ui.send({"t": "feature_result", "id": "followup", "ok": True, "message": f"Follow-up {'on' if d.followup else 'off'}."})
+            elif cmd.get("id") == "persona" and cmd.get("values"):
+                v = {k: str(x).strip() for k, x in cmd["values"].items()
+                     if k in ("ORIONKIT_VOICE", "ORIONKIT_SPEED", "ORIONKIT_PERSONA") and str(x).strip()}
+                try:
+                    save_env(v)
+                    if d and (v.get("ORIONKIT_VOICE") or v.get("ORIONKIT_SPEED")):
+                        d._tts.configure(voice=v.get("ORIONKIT_VOICE"), speed=float(v["ORIONKIT_SPEED"]) if "ORIONKIT_SPEED" in v else None)
+                    ui.send({"t": "feature_result", "id": "persona", "ok": True, "message": "Saved."})
+                except (ValueError, KeyError) as e:
+                    ui.send({"t": "feature_result", "id": "persona", "ok": False, "message": f"Couldn't use that: {e}"})
             elif cmd.get("id") in ("voice", "local"):
                 ui.send({"t": "feature_result", "id": cmd["id"], "ok": True, "message": "Built in and always on."})
             else:
@@ -173,7 +185,7 @@ async def orb(args: argparse.Namespace, brain: LocalBrain) -> None:
     webbrowser.open(ui.url)
     print("Loading voice models…")
     wake = None if args.no_wake else create_wake(mic, args.wake)
-    duplex = DuplexController(SpeechSegmenter(mic), STTWorker(), TTSEngine(player), respond, wake,
+    duplex = DuplexController(SpeechSegmenter(mic), STTWorker(), TTSEngine(player, **voice_settings()), respond, wake,
                               DuplexConfig(followup=os.environ.get("ORIONKIT_FOLLOWUP") == "1"), EchoGate(mic, player))
     holder["duplex"] = duplex
     async with mic:

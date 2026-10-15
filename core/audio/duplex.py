@@ -138,8 +138,7 @@ class DuplexController:
                         self._seg.reset()
                         continue
                     self._barge_in("speech")
-                elif self.state is State.LISTENING and not self._in_followup:
-                    self._deadline = None  # user is talking to us; don't time out mid-sentence
+                # while LISTENING the timeout loop waits for an utterance in progress to finish (no deadline reset)
                 # In a follow-up window the deadline stays fixed: background chatter can't keep it open.
             elif isinstance(event, Utterance) and self.state is State.LISTENING:
                 await self._handle_utterance(event)
@@ -151,8 +150,8 @@ class DuplexController:
         while True:
             await asyncio.sleep(0.1)
             if self.state is State.LISTENING and self._deadline and time.monotonic() > self._deadline:
-                if self._in_followup and self._seg.in_speech:
-                    continue  # they started inside the window: let them finish the sentence
+                if self._seg.in_speech:
+                    continue  # they're mid-sentence: let them finish (background chatter ends too, then we time out)
                 self._stop_listening("timeout")
 
     # ---- turn handling ------------------------------------------------------------------------
@@ -168,7 +167,7 @@ class DuplexController:
         if len(request.split()) >= 2:  # "Hey Orion, what's the weather?": answer straight away
             rest = Transcript(request, transcript.latency_ms, transcript.audio_s)
             self._emit("transcript", transcript=rest)
-            self._reply = asyncio.create_task(self._speak(request))
+            self._start_reply(request)
         else:
             self._seg.reset()
             self._start_listening()
@@ -177,6 +176,8 @@ class DuplexController:
         followup = self._in_followup
         self._set(State.THINKING)
         transcript = await self._stt.transcribe(utt.audio)
+        if self.state is not State.THINKING:  # stopped, or a typed request took over while we transcribed
+            return
         text = transcript.text.strip()
         if not text:
             self._stop_listening("nothing heard")
@@ -186,11 +187,14 @@ class DuplexController:
             self._stop_listening("dismissed")
             return
         if followup and self._addressed is not None and not await self._addressed(text):
-            log.info("follow-up not meant for Orion, ignored: %r", text)
-            self._stop_listening("not addressed")
+            if self.state is State.THINKING:
+                log.info("follow-up not meant for Orion, ignored: %r", text)
+                self._stop_listening("not addressed")
+            return
+        if self.state is not State.THINKING:
             return
         self._emit("transcript", transcript=transcript)
-        self._reply = asyncio.create_task(self._speak(text))
+        self._start_reply(text)
 
     def talk(self) -> None:
         """Tap-to-talk (UI button / orb click): like saying the wake word."""
@@ -209,15 +213,30 @@ class DuplexController:
 
     async def submit_text(self, text: str) -> None:
         """A typed request (from the UI): handled like speech, interrupting any reply in progress."""
-        if self.state is State.SPEAKING:
-            self._tts.interrupt()
         self._emit("transcript", transcript=Transcript(text, 0.0, 0.0))
+        self._start_reply(text)
+
+    def _start_reply(self, text: str) -> None:
+        """One reply at a time: a new request replaces the one in progress (two would interleave audio and history)."""
+        if self.state is State.SPEAKING:  # a reply or an announcement is playing
+            self._tts.interrupt()
+        if self._reply is not None and not self._reply.done():
+            self._reply.cancel()
+        self._set(State.SPEAKING)
         self._reply = asyncio.create_task(self._speak(text))
 
     async def _speak(self, text: str) -> None:
         self._in_followup = False
         self._set(State.SPEAKING)
-        result = await self._tts.speak(self._respond(text))
+        try:
+            result = await self._tts.speak(self._respond(text))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("reply failed")
+            if self.state is State.SPEAKING:
+                self._after_reply()
+            return
         self._emit("reply", result=result)
         if not result.interrupted:  # barge-in already moved us to LISTENING
             self._after_reply()
@@ -228,7 +247,12 @@ class DuplexController:
             await asyncio.sleep(0.2)
         self._emit("announce")
         self._set(State.SPEAKING)
-        result = await self._tts.speak(text)
+        try:
+            result = await self._tts.speak(text)
+        except Exception:
+            log.exception("announcement failed")
+            self._after_reply()
+            return
         if not result.interrupted:
             self._after_reply()
 

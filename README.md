@@ -11,12 +11,15 @@ full-duplex voice loop in Python.
 - **Echo rejection**: its own voice through laptop speakers doesn't count as an interruption.
 - **Local brain**: any Ollama model, fully offline.
 
-## Quick start (Python 3.11+)
+## Quick start (Python 3.11 or 3.12)
+
+Install [Ollama](https://ollama.com/download) and open it. On a Mac the built-in `python3` is too old:
+`brew install python@3.12`.
 
 ```sh
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-./scripts/download_models.sh                 # ~450 MB of voice models
-ollama pull qwen3:4b-instruct                       # or any chat model
+python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python scripts/download_models.py  # ~450 MB of voice models (Windows too)
+ollama pull qwen3:4b-instruct                # or any chat model
 .venv/bin/python voice_chat.py               # opens the orb window; say "Hey Orion"
 .venv/bin/python voice_chat.py --terminal    # prefer the terminal
 ```

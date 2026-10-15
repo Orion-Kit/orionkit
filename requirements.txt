@@ -2,7 +2,7 @@ numpy>=1.26
 scipy>=1.11
 sounddevice>=0.5
 onnxruntime>=1.18
-openwakeword==0.6.0
+openwakeword==0.6.0; platform_system != "Linux"
 sherpa-onnx>=1.12
 sentencepiece>=0.2
 faster-whisper>=1.1

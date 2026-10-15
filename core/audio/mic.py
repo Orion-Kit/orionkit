@@ -3,12 +3,17 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Callable
 from typing import Optional
 
 import numpy as np
 
 SAMPLE_RATE = 16_000
 FRAME_SAMPLES = 512  # 32 ms: Silero VAD's native frame at 16 kHz
+
+
+class MicError(RuntimeError):
+    """No usable microphone; the message says what to do."""
 
 
 class RingBuffer:
@@ -65,6 +70,8 @@ class MicStream:
         self._stream = None
         self._carry = np.zeros(0, dtype=np.int16)
         self.rms: float = 0.0  # level of the most recent frame (0..1)
+        self.peak: float = 0.0  # loudest frame so far: 0.0 means no audio at all is arriving
+        self.on_silent: Callable[[str], None] | None = None
         self.muted = False     # privacy mute: capture continues, but everyone downstream hears silence
 
     def subscribe(self) -> asyncio.Queue[np.ndarray]:
@@ -81,16 +88,27 @@ class MicStream:
             return
         import sounddevice as sd
 
-        self._stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype="int16",
-            blocksize=FRAME_SAMPLES,
-            latency="low",
-            device=self._device,
-            callback=self._callback,
-        )
-        self._stream.start()
+        try:
+            self._stream = sd.InputStream(
+                samplerate=SAMPLE_RATE,
+                channels=1,
+                dtype="int16",
+                blocksize=FRAME_SAMPLES,
+                latency="low",
+                device=self._device,
+                callback=self._callback,
+            )
+            self._stream.start()
+        except sd.PortAudioError as e:
+            raise MicError(f"No microphone available ({e}). Pick one with --input N (see python main.py "
+                           "--list-devices), or use --text for typed chat.") from e
+        self._loop.call_later(6, self._check_silent)
+
+    def _check_silent(self) -> None:
+        """macOS gives silence, not an error, when the terminal isn't allowed to use the mic."""
+        if self._stream is not None and self.peak == 0.0 and self.on_silent:
+            self.on_silent("The microphone is completely silent. On macOS, allow your terminal app in System Settings > "
+                           "Privacy & Security > Microphone, then restart it. Typing still works.")
 
     async def stop(self) -> None:
         if self._stream is not None:
@@ -122,6 +140,7 @@ class MicStream:
         for i in range(n_frames):
             frame = data[i * FRAME_SAMPLES:(i + 1) * FRAME_SAMPLES]
             self.rms = float(np.sqrt(np.mean((frame.astype(np.float32) / 32768.0) ** 2)))
+            self.peak = max(self.peak, self.rms)
             for q in self._subs:
                 if q.full():  # a slow consumer drops its oldest audio rather than blocking capture
                     q.get_nowait()
