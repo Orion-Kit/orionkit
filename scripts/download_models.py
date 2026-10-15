@@ -13,6 +13,8 @@ FILES = {
     "silero_vad.onnx": "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx",
     "kokoro-v1.0.int8.onnx": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/kokoro-v1.0.int8.onnx",
     "voices-v1.0.bin": "https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin",
+    # Smart Turn v3.2 (BSD-2, ~8 MB): knows when you've finished talking, not just paused
+    "smart_turn/smart-turn-v3.2-cpu.onnx": "https://huggingface.co/pipecat-ai/smart-turn-v3/resolve/main/smart-turn-v3.2-cpu.onnx",
 }
 KWS = ("https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/"
        "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01.tar.bz2")
@@ -32,6 +34,7 @@ def fetch(url: str, dest: Path) -> None:
 def main() -> int:
     MODELS.mkdir(exist_ok=True)
     for name, url in FILES.items():
+        (MODELS / name).parent.mkdir(parents=True, exist_ok=True)
         fetch(url, MODELS / name)
     kws = MODELS / "kws"
     if not (kws / "tokens.txt").is_file():

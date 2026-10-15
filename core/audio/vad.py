@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum, auto
 from pathlib import Path
@@ -11,7 +14,9 @@ from typing import Union
 import numpy as np
 
 from .mic import FRAME_SAMPLES, SAMPLE_RATE, MicStream
+from .turn import SmartTurn
 
+log = logging.getLogger("orionkit.vad")
 DEFAULT_MODEL = Path(__file__).resolve().parents[2] / "models" / "silero_vad.onnx"
 CONTEXT_SAMPLES = 64  # Silero v5 expects the last 64 samples of the previous frame prepended
 
@@ -73,8 +78,12 @@ class SpeechSegmenter:
     """Hysteresis state machine over Silero probabilities.
 
     Emits ``SpeechStart`` once ``min_speech_ms`` of speech is confirmed (the barge-in signal) and an
-    ``Utterance`` after ``min_silence_ms`` of trailing silence. Ambient silence never leaves this class.
-    ``threshold`` can be raised at runtime (duplex does this while TTS plays, to resist echo).
+    ``Utterance`` when the speaker is done. Ambient silence never leaves this class. ``threshold`` can be raised
+    at runtime (duplex does this while TTS plays, to resist echo).
+
+    "Done" is decided by Smart Turn when its model is installed: after ``check_ms`` of silence it asks whether the
+    turn sounds finished; yes ends it right away, no keeps listening (re-asking every ``recheck_ms``) up to
+    ``max_silence_ms``, so a mid-thought pause doesn't cut you off. Without the model: ``min_silence_ms`` of silence.
     """
 
     def __init__(
@@ -86,6 +95,10 @@ class SpeechSegmenter:
         min_silence_ms: int = 400,
         pad_ms: int = 200,
         max_utterance_s: float = 20.0,
+        turn: SmartTurn | None = None,
+        check_ms: int = 200,
+        recheck_ms: int = 500,
+        max_silence_ms: int | None = None,
     ) -> None:
         self._frames = mic.subscribe()
         self._vad = vad or SileroVAD()
@@ -95,6 +108,17 @@ class SpeechSegmenter:
         self._end_frames = max(1, round(min_silence_ms / self._ms_per_frame))
         self._pad_frames = max(0, round(pad_ms / self._ms_per_frame))
         self._max_frames = int(max_utterance_s * 1000 / self._ms_per_frame)
+        self._max_hold_frames = int(60 * 1000 / self._ms_per_frame)
+        self.turn = turn if turn is not None else SmartTurn()
+        if max_silence_ms is None:
+            max_silence_ms = int(float(os.environ.get("ORIONKIT_TURN_MAX_SILENCE", "1.6") or 1.6) * 1000)
+        self._check_frames = max(1, round(check_ms / self._ms_per_frame))
+        self._recheck_frames = max(1, round(recheck_ms / self._ms_per_frame))
+        self._max_silence_frames = max(self._check_frames, round(max_silence_ms / self._ms_per_frame))
+        self._pool: ThreadPoolExecutor | None = None  # off the event loop: a check takes ~10-60 ms
+        self._turn_future: Future[float | None] | None = None
+        self.last_turn_p: float | None = None
+        self._turn_off = False  # a minute of held speech at most
         self.events: asyncio.Queue[VADEvent] = asyncio.Queue()
         self.last_prob = 0.0
         self.reset()
@@ -111,14 +135,30 @@ class SpeechSegmenter:
     def in_speech(self) -> bool:
         return self._in_speech
 
+    def begin_hold(self) -> None:
+        """Push-to-talk: from now on keep every frame (starting with the short pre-roll, so the first syllable is
+        there) and emit nothing, however long the pauses, until end_hold()."""
+        self._hold = list(self._preroll if not self._in_speech else self._speech)
+
+    def end_hold(self) -> np.ndarray | None:
+        """Stop holding; the audio captured since begin_hold() (float32 16 kHz), or None if there was no hold."""
+        frames, self._hold = self._hold, None
+        self.reset()
+        if frames is None:
+            return None
+        return np.concatenate(frames).astype(np.float32) / 32768.0 if frames else np.zeros(0, np.float32)
+
     def reset(self) -> None:
         """Drop any partial utterance (used after wake / barge-in to start a clean turn)."""
+        self._hold = getattr(self, "_hold", None)  # a hold survives resets (wake word mid-hold); end_hold() ends it
         self._vad.reset()
         self._preroll: list[np.ndarray] = []
         self._speech: list[np.ndarray] = []
         self._in_speech = False
         self._voiced_run = 0
         self._silent_run = 0
+        self._turn_future = None
+        self._next_check = 0
 
     async def run(self) -> None:
         while True:
@@ -127,6 +167,10 @@ class SpeechSegmenter:
                 await self.events.put(event)
 
     def process(self, frame: np.ndarray) -> list[VADEvent]:
+        if self._hold is not None:  # push-to-talk: the key, not silence, ends the turn
+            if len(self._hold) < self._max_hold_frames:
+                self._hold.append(frame)
+            return []
         prob = self._vad(frame)
         self.last_prob = prob
         # Hysteresis: once inside speech, stay in until prob falls well under the entry threshold.
@@ -148,7 +192,9 @@ class SpeechSegmenter:
 
         self._speech.append(frame)
         self._silent_run = 0 if voiced else self._silent_run + 1
-        if self._silent_run >= self._end_frames or len(self._speech) >= self._max_frames:
+        if self._silent_run == 0:
+            self._turn_future, self._next_check = None, 0  # still talking: any pending verdict is stale
+        if self._turn_done() or len(self._speech) >= self._max_frames:
             # Keep pad_ms of trailing silence; trim the rest so STT sees clean speech.
             trim = max(0, self._silent_run - self._pad_frames)
             frames = self._speech[: len(self._speech) - trim] if trim else self._speech
@@ -157,4 +203,28 @@ class SpeechSegmenter:
             self._in_speech = False
             self._speech, self._preroll = [], []
             self._voiced_run = self._silent_run = 0
+            self._turn_future, self._next_check = None, 0
         return out
+
+    def _turn_done(self) -> bool:
+        """Is the current utterance over? Smart Turn when available, else the fixed silence rule."""
+        if self._turn_off or not self.turn.available:
+            return self._silent_run >= self._end_frames
+        if self._silent_run >= self._max_silence_frames:
+            return True
+        if self._turn_future is not None and self._turn_future.done():
+            p, self._turn_future = self._turn_future.result(), None
+            self.last_turn_p = p
+            if p is None:  # the model failed: from now on, the fixed rule
+                self._turn_off = True
+                return self._silent_run >= self._end_frames
+            log.debug("smart turn p=%.2f after %d ms of silence", p, self._silent_run * self._ms_per_frame)
+            if p >= self.turn.threshold:
+                return True
+            self._next_check = self._silent_run + self._recheck_frames
+        if self._turn_future is None and self._silent_run >= max(self._check_frames, self._next_check):
+            audio = np.concatenate(self._speech).astype(np.float32) / 32768.0
+            self._pool = self._pool or ThreadPoolExecutor(max_workers=1, thread_name_prefix="smart-turn")
+            self._turn_future = self._pool.submit(self.turn.probability, audio)
+            self._next_check = self._silent_run + self._recheck_frames
+        return False

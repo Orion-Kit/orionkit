@@ -1,9 +1,10 @@
 """Duplex turn controller with barge-in.
 
 States: IDLE (waiting for the wake word) -> LISTENING -> THINKING -> SPEAKING -> LISTENING (follow-up
-window) -> IDLE. If confirmed user speech (or the wake word) arrives while SPEAKING, the TTS job is
-cancelled, the output buffer is flushed and the controller returns to LISTENING with the interrupting
-utterance still being captured, so it becomes the next turn.
+window) -> IDLE. If confirmed user speech arrives while SPEAKING, Orion goes quiet at once (the speaker pauses,
+generation carries on) and listens to what was said: a real request replaces the reply and becomes the next turn,
+"stop" ends it, and a cough, "mm-hmm" or "yeah" (or its own voice) resumes the reply where it paused. The wake
+word, tap-to-talk and push-to-talk always interrupt outright.
 
 Echo: without hardware echo cancellation the mic hears the speaker. While SPEAKING the VAD threshold
 and minimum speech length are raised, and an optional ``EchoGate`` rejects "speech" that is explained
@@ -12,6 +13,7 @@ by what the speaker just played, so Orion's own voice does not trigger barge-in.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import re
 import time
@@ -26,6 +28,12 @@ from .vad import SpeechSegmenter, SpeechStart, Utterance
 from .wake import KeywordWakeDetector, WakeEvent, WakeWordDetector
 
 log = logging.getLogger("orionkit.duplex")
+
+# Listener noises while Orion talks: not a new request, so the reply carries on.
+BACKCHANNEL = re.compile(r"^\W*(m+[- ]?h*m+|mhm+|hmm+|uh[- ]?huh|uh+|um+|ah+|oh+|yeah|yep|yes|ok(ay)?|right|sure|cool|nice|"
+                         r"got it|i see|wow|interesting|go on)([\s,.!]+(yeah|ok(ay)?|right|sure|mhm))*\W*$", re.I)
+# "Stop" / "wait" while Orion talks: stop the reply and listen for what comes next (not the end of the conversation).
+HOLD_ON = re.compile(r"^\W*(stop|wait|hold on|hang on|one (sec(ond)?|moment)|just a (sec(ond)?|moment))\W*$", re.I)
 
 Responder = Callable[[str], AsyncIterator[str]]  # transcript -> streamed reply tokens
 
@@ -95,10 +103,16 @@ class DuplexController:
         self.events: asyncio.Queue[TurnEvent] = asyncio.Queue()
         self._deadline: float | None = None
         self._reply: asyncio.Task[None] | None = None
+        self._ptt_since: float | None = None   # push-to-talk key held since (monotonic), else None
+        self._paused_at: float | None = None   # speaker paused for a possible interruption
+        self._deciding = False                 # transcribing that interruption
+        self._reply_text = ""                  # what the current reply has said so far (to spot echo)
+        self._ptt_task: asyncio.Task[None] | None = None
         self._apply_vad_profile()
 
     async def run(self) -> None:
-        tasks = [asyncio.create_task(self._seg.run()), asyncio.create_task(self._vad_loop())]
+        tasks = [asyncio.create_task(self._seg.run()), asyncio.create_task(self._vad_loop()),
+                 asyncio.create_task(self._pause_watchdog())]
         if self._wake:
             tasks += [asyncio.create_task(self._wake.run()), asyncio.create_task(self._wake_loop())]
             tasks.append(asyncio.create_task(self._timeout_loop()))
@@ -132,14 +146,19 @@ class DuplexController:
             event = await self._seg.events.get()
             log.debug("vad %s in %s", type(event).__name__, self.state.value)
             if isinstance(event, SpeechStart):
-                if self.state is State.SPEAKING:
+                if self.state is State.SPEAKING and not self._speaker_paused:
                     if self._is_echo():
                         # Drop the echo segment so continued real speech raises a fresh SpeechStart.
                         self._seg.reset()
                         continue
-                    self._barge_in("speech")
+                    if hasattr(self._tts, "pause"):
+                        self._pause_for_interruption()
+                    else:  # a TTS that can't pause: interrupt outright, as before
+                        self._barge_in("speech")
                 # while LISTENING the timeout loop waits for an utterance in progress to finish (no deadline reset)
                 # In a follow-up window the deadline stays fixed: background chatter can't keep it open.
+            elif isinstance(event, Utterance) and self.state is State.SPEAKING and self._speaker_paused:
+                await self._decide_interruption(event)
             elif isinstance(event, Utterance) and self.state is State.LISTENING:
                 await self._handle_utterance(event)
             elif isinstance(event, Utterance) and self.state is State.IDLE and self._cfg.stt_wake \
@@ -149,7 +168,7 @@ class DuplexController:
     async def _timeout_loop(self) -> None:
         while True:
             await asyncio.sleep(0.1)
-            if self.state is State.LISTENING and self._deadline and time.monotonic() > self._deadline:
+            if self.state is State.LISTENING and self._deadline and time.monotonic() > self._deadline and not self.ptt_held:
                 if self._seg.in_speech:
                     continue  # they're mid-sentence: let them finish (background chatter ends too, then we time out)
                 self._stop_listening("timeout")
@@ -205,6 +224,44 @@ class DuplexController:
             self._start_listening()
         self._emit("wake")
 
+    # ---- push-to-talk ---------------------------------------------------------------------------------
+
+    PTT_TAP_S = 0.25  # shorter than this is a tap: same as the talk button
+
+    def ptt_start(self) -> None:
+        """Key pressed: interrupt any reply and listen for as long as the key is held (no timeout, pauses allowed)."""
+        if self._ptt_since is not None:  # key auto-repeat
+            return
+        self._ptt_since = time.monotonic()
+        if self.state is State.SPEAKING:
+            self._tts.interrupt()
+        elif self.state is State.IDLE:
+            self._chime("start")
+        self._in_followup = False
+        self._set(State.LISTENING)  # no deadline while held; a THINKING turn in flight sees this and stands down
+        self._seg.begin_hold()
+        self._emit("wake")
+
+    def ptt_end(self) -> None:
+        """Key released: what was said while it was held is the request. A tap just opens a normal listening turn."""
+        if self._ptt_since is None:
+            return
+        held, self._ptt_since = time.monotonic() - self._ptt_since, None
+        audio = self._seg.end_hold()
+        if self.state is not State.LISTENING:  # something else took over meanwhile (a typed request)
+            return
+        if held < self.PTT_TAP_S:
+            self._set(State.LISTENING, self._cfg.listen_timeout_s)
+            return
+        if audio is None or len(audio) < 0.3 * 16000:
+            self._stop_listening("push-to-talk: nothing held")
+            return
+        self._ptt_task = asyncio.ensure_future(self._handle_utterance(Utterance(audio)))
+
+    @property
+    def ptt_held(self) -> bool:
+        return self._ptt_since is not None
+
     def stop(self) -> None:
         """Stop talking now and go back to waiting for the wake word."""
         if self.state is State.SPEAKING:
@@ -228,8 +285,15 @@ class DuplexController:
     async def _speak(self, text: str) -> None:
         self._in_followup = False
         self._set(State.SPEAKING)
+        self._reply_text = ""
+
+        async def tokens() -> AsyncIterator[str]:
+            async with contextlib.aclosing(self._respond(text)) as inner:
+                async for token in inner:
+                    self._reply_text += token
+                    yield token
         try:
-            result = await self._tts.speak(self._respond(text))
+            result = await self._tts.speak(tokens())
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -246,6 +310,7 @@ class DuplexController:
         while self.state in (State.THINKING, State.SPEAKING):
             await asyncio.sleep(0.2)
         self._emit("announce")
+        self._reply_text = text
         self._set(State.SPEAKING)
         try:
             result = await self._tts.speak(text)
@@ -262,6 +327,75 @@ class DuplexController:
         self._emit("echo_ignored")
         log.debug("speech during playback matched the speaker output (%.2f): ignored", self._echo.last_similarity)
         return True
+
+    def _pause_for_interruption(self) -> None:
+        """Speech over Orion: go quiet now, decide once we know what was said."""
+        self._tts.pause()
+        self._paused_at = time.monotonic()
+        self._apply_vad_profile()  # the speaker is silent now: no echo to resist, so hear every word
+        self._emit("barge_in")
+        log.info("paused for an interruption (vad %.2f)", self._seg.last_prob)
+
+    def _resume(self, why: str) -> None:
+        self._paused_at = None
+        if self.state is State.SPEAKING and self._speaker_paused:
+            self._tts.resume()
+            self._apply_vad_profile()
+            self._emit("resumed")
+            log.info("not an interruption (%s): resuming", why)
+
+    async def _decide_interruption(self, utt: Utterance) -> None:
+        self._deciding = True
+        try:
+            transcript = await self._stt.transcribe(utt.audio)
+        except Exception:  # never leave the speaker paused (or kill the voice loop) over one bad transcription
+            log.exception("transcribing an interruption failed; resuming")
+            self._resume("transcription failed")
+            return
+        finally:
+            self._deciding = False
+        if self.state is not State.SPEAKING or not self._speaker_paused:
+            return  # the reply ended or was replaced while we listened
+        self._paused_at = None
+        text = transcript.text.strip()
+        if not text or BACKCHANNEL.match(text):
+            self._resume(repr(text) if text else "no words")
+            return
+        if self._sounds_like_reply(text):
+            self._emit("echo_ignored")
+            self._resume("its own voice")
+            return
+        await self._end_reply()  # a real interruption: the paused reply ends (and reports itself interrupted)
+        if HOLD_ON.match(text):  # a control word, like the wake word: not a request of its own
+            self._start_listening()
+            return
+        self._emit("transcript", transcript=transcript)
+        if re.match(self._cfg.end_pattern, text, re.I):
+            self._stop_listening("dismissed while speaking")
+        else:
+            self._start_reply(text)
+
+    async def _end_reply(self) -> None:
+        self._tts.interrupt()
+        if self._reply is not None and not self._reply.done():
+            await asyncio.wait({self._reply}, timeout=1.0)
+
+    def _sounds_like_reply(self, text: str) -> bool:
+        """Did the mic just hear Orion's own words (echo the gate missed)?"""
+        heard = [w.strip(".,!?'\"").lower() for w in text.split()]
+        said = {w.strip(".,!?'\"").lower() for w in self._reply_text.split()}
+        return len(heard) >= 3 and sum(w in said for w in heard) / len(heard) >= 0.7
+
+    async def _pause_watchdog(self) -> None:
+        """A pause that never turned into an utterance (a click, a door) mustn't leave Orion silent."""
+        while True:
+            await asyncio.sleep(0.2)
+            if self._paused_at is None or self._deciding or self._seg.in_speech:
+                continue
+            if self.state is not State.SPEAKING or not self._speaker_paused:
+                self._paused_at = None
+            elif time.monotonic() - self._paused_at > 1.5:
+                self._resume("no speech followed")
 
     def _barge_in(self, cause: str = "speech") -> None:
         sim = self._echo.last_similarity if self._echo else float("nan")
@@ -308,8 +442,12 @@ class DuplexController:
         self._apply_vad_profile()
         self._emit("state")
 
+    @property
+    def _speaker_paused(self) -> bool:
+        return bool(getattr(self._tts, "paused", False))  # TTS stand-ins without pause support never pause
+
     def _apply_vad_profile(self) -> None:
-        speaking = self.state is State.SPEAKING
+        speaking = self.state is State.SPEAKING and not self._speaker_paused
         self._seg.threshold = self._cfg.barge_in_threshold if speaking else self._cfg.idle_threshold
         self._seg.min_speech_ms = self._cfg.barge_in_min_ms if speaking else self._cfg.idle_min_ms
 

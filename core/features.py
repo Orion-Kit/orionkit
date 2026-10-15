@@ -40,6 +40,9 @@ class Feature:
 
 FEATURES: tuple[Feature, ...] = (
     Feature("voice", "Voice & “Hey Orion”", "Wake word, barge-in and on-device speech.", "Meissa", False, "info"),
+    Feature("push_to_talk", "Push-to-talk", "Hold ⌃⌥Space (Ctrl+Alt+Space) anywhere to talk without the wake word; "
+            "⌃⌥M mutes the mic.", "Meissa", False, "toggle", env="ORIONKIT_PTT", default_on=True,
+            how="macOS asks once for Accessibility and Input Monitoring for your terminal app."),
     Feature("followup", "Follow-up mode", "One short window after each reply where you don't need the wake word.", "Meissa", False,
             "toggle", env="ORIONKIT_FOLLOWUP"),
     Feature("persona", "Voice & personality", "Choose Orion's voice, how fast it talks and its personality.", "Bellatrix", False,
@@ -64,6 +67,8 @@ FEATURES: tuple[Feature, ...] = (
             "clipboard, apps, Spotify or Music and the volume.", "M42", True, "info"),
     Feature("history", "Conversation history", "Remembers past conversations on this computer, so you can ask “what did I "
             "ask about Docker last week?”.", "Saiph", True, "toggle", env="ORIONKIT_HISTORY", default_on=True),
+    Feature("routines", "Routines", "Say “good morning” to run several things at once; ask Orion to create one.", "Saiph", True,
+            "info"),
     Feature("home_assistant", "Home Assistant", "Control 3,000+ smart-home brands, including Google Nest and Alexa devices.",
             "M42", True, "keys", fields=(Field("HA_URL", "Home Assistant URL", secret=False, placeholder="http://homeassistant.local:8123"),
                                        Field("HA_TOKEN", "Long-lived access token")),

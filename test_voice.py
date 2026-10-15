@@ -68,7 +68,7 @@ def describe(e: TurnEvent) -> str | None:
     if e.kind == "reply" and e.result:
         r = e.result
         return "✋ reply interrupted" if r.interrupted else f"🔊 replied: {r.sentences} chunks, first audio {r.first_audio_ms:.0f} ms after first token"
-    return {"wake": "👂 wake word", "barge_in": "⚡ barge-in: TTS flushed", "timeout": "💤 no speech, back to idle"}.get(e.kind)
+    return {"wake": "👂 wake word", "barge_in": "⚡ barge-in: speaker paused", "resumed": "▶ not an interruption: resumed", "timeout": "💤 no speech, back to idle"}.get(e.kind)
 
 
 async def live(args: argparse.Namespace) -> None:
@@ -172,8 +172,13 @@ async def self_test(args: argparse.Namespace) -> int:
 
         print("2. speech -> STT -> streaming TTS echo")
         spoken = "What is the weather like in Chicago today?"
-        await say(to_mic(spoken))
-        t = (await wait_for("transcript")).transcript
+        pcm = to_mic(spoken)
+        voiced = np.flatnonzero(np.abs(pcm) > 0.02 * np.abs(pcm).max())
+        tail_s = (len(pcm) - voiced[-1]) / SAMPLE_RATE  # the clip's own trailing silence
+        spoke_until = await say(pcm) - tail_s
+        te = await wait_for("transcript")
+        t = te.transcript
+        print(f"   ⏱  end of speech → transcript {(te.at - spoke_until) * 1000:.0f} ms (turn detection + STT)")
         assert t is not None
         words = lambda s: [w.strip(".,?!").lower() for w in s.split()]
         checks.append(("transcript matches", words(t.text) == words(spoken), repr(t.text)))
@@ -209,7 +214,7 @@ async def self_test(args: argparse.Namespace) -> int:
         e = await wait_for("barge_in", 5)
         reaction_ms = (e.at - interrupt_at) * 1000
         checks.append(("barge-in < 800 ms (speakers leaking)", reaction_ms < 800, f"{reaction_ms:.0f} ms"))
-        checks.append(("speaker flushed", not player.playing, f"playing={player.playing}"))
+        checks.append(("speaker silenced", not player.audible, f"audible={player.audible}"))
         r = (await wait_for("reply")).result
         checks.append(("TTS generation halted", bool(r and r.interrupted), ""))
         await speech_task

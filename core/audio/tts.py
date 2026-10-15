@@ -126,10 +126,22 @@ class AudioPlayer:
         self.rms = 0.0  # level of the most recent output block
         # What actually went to the speaker, at the mic's 16 kHz, for echo detection.
         self.reference = RingBuffer(int(SAMPLE_RATE * 2.0))
+        self.paused = False
 
     @property
     def playing(self) -> bool:
         return not self._idle.is_set()
+
+    @property
+    def audible(self) -> bool:
+        return self.playing and not self.paused
+
+    def pause(self) -> None:
+        """Go silent within one block but keep the queue: resume() carries on from the same sample."""
+        self.paused = True
+
+    def resume(self) -> None:
+        self.paused = False
 
     async def start(self) -> None:
         # scipy costs ~0.9 s to import: TTSEngine loads it in its loader thread, so it's cached by now
@@ -166,6 +178,7 @@ class AudioPlayer:
         with self._lock:
             self._chunks.clear()
             self._offset = 0
+        self.paused = False
         self._idle.set()
         if self.on_flush:
             self.on_flush()
@@ -177,7 +190,7 @@ class AudioPlayer:
         out = np.zeros(n, dtype=np.float32)
         filled = 0
         with self._lock:
-            while filled < n and self._chunks:
+            while filled < n and self._chunks and not self.paused:
                 head = self._chunks[0]
                 take = min(n - filled, len(head) - self._offset)
                 out[filled:filled + take] = head[self._offset:self._offset + take]
@@ -186,7 +199,7 @@ class AudioPlayer:
                 if self._offset >= len(head):
                     self._chunks.popleft()
                     self._offset = 0
-            empty = not self._chunks
+            empty = not self._chunks and not self.paused
         self.rms = float(np.sqrt(np.mean(out ** 2))) if filled else 0.0
         self.reference.write((np.clip(self._resample(out, 2, 3), -1, 1) * 32767).astype(np.int16))
         if empty and self._loop is not None:
@@ -283,6 +296,17 @@ class TTSEngine:
         env = np.sin(np.pi * np.arange(n) / n) ** 2  # smooth attack/release, no clicks
         tone = np.concatenate([0.12 * np.sin(2 * np.pi * f * t) * env for f in notes]).astype(np.float32)
         self._player.enqueue(tone)
+
+    def pause(self) -> None:
+        """Someone may be interrupting: silence the speaker but keep generating, so resume() loses nothing."""
+        self._player.pause()
+
+    def resume(self) -> None:
+        self._player.resume()
+
+    @property
+    def paused(self) -> bool:
+        return self._player.paused
 
     def interrupt(self) -> None:
         """Barge-in: stop consuming tokens, abandon pending synthesis, silence the speaker."""
