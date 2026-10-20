@@ -34,6 +34,9 @@ BACKCHANNEL = re.compile(r"^\W*(m+[- ]?h*m+|mhm+|hmm+|uh[- ]?huh|uh+|um+|ah+|oh+
                          r"got it|i see|wow|interesting|go on)([\s,.!]+(yeah|ok(ay)?|right|sure|mhm))*\W*$", re.I)
 # "Stop" / "wait" while Orion talks: stop the reply and listen for what comes next (not the end of the conversation).
 HOLD_ON = re.compile(r"^\W*(stop|wait|hold on|hang on|one (sec(ond)?|moment)|just a (sec(ond)?|moment))\W*$", re.I)
+# "That wasn't for you": the wake word fired by mistake. Back to idle, and counted (opt-in diagnostics) as a correction.
+NOT_FOR_YOU = re.compile(r"^\W*(no,? )?(that|it|this) (was ?n'?t|was not|is ?n'?t|is not) (meant )?(for|to) you\W*$|"
+                         r"^\W*(no,? )?(i was ?n'?t|i was not|i'?m not) talking to you\W*$|^\W*not (you|for you)\W*$", re.I)
 
 Responder = Callable[[str], AsyncIterator[str]]  # transcript -> streamed reply tokens
 
@@ -75,6 +78,7 @@ class TurnEvent:
     transcript: Transcript | None = None
     result: SpeakResult | None = None
     at: float = 0.0
+    detail: str = ""  # wake: what woke it (wake word, transcript, tap, push-to-talk); timeout: why it went idle
 
 
 class DuplexController:
@@ -138,7 +142,7 @@ class DuplexController:
                     self._start_listening()
                 else:
                     self._in_followup = False  # the wake word makes a follow-up explicit
-            self._emit("wake")
+            self._emit("wake", detail="wake word")
             log.info("wake %s %.2f", event.model, event.score)
 
     async def _vad_loop(self) -> None:
@@ -180,7 +184,7 @@ class DuplexController:
         m = re.match(self._cfg.stt_wake_pattern, transcript.text, re.I)
         if not m or self.state is not State.IDLE:  # not addressed to us, or the keyword spotter already woke
             return
-        self._emit("wake")
+        self._emit("wake", detail="transcript")
         log.info("wake via transcript %r", transcript.text)
         request = m.group(1).strip()
         if len(request.split()) >= 2:  # "Hey Orion, what's the weather?": answer straight away
@@ -200,6 +204,9 @@ class DuplexController:
         text = transcript.text.strip()
         if not text:
             self._stop_listening("nothing heard")
+            return
+        if NOT_FOR_YOU.match(text):
+            self._stop_listening("not for you")
             return
         if re.match(self._cfg.end_pattern, text, re.I):
             self._emit("transcript", transcript=transcript)
@@ -222,7 +229,7 @@ class DuplexController:
         elif self.state is State.IDLE:
             self._seg.reset()
             self._start_listening()
-        self._emit("wake")
+        self._emit("wake", detail="tap")
 
     # ---- push-to-talk ---------------------------------------------------------------------------------
 
@@ -240,7 +247,7 @@ class DuplexController:
         self._in_followup = False
         self._set(State.LISTENING)  # no deadline while held; a THINKING turn in flight sees this and stands down
         self._seg.begin_hold()
-        self._emit("wake")
+        self._emit("wake", detail="push-to-talk")
 
     def ptt_end(self) -> None:
         """Key released: what was said while it was held is the request. A tap just opens a normal listening turn."""
@@ -366,6 +373,9 @@ class DuplexController:
             self._resume("its own voice")
             return
         await self._end_reply()  # a real interruption: the paused reply ends (and reports itself interrupted)
+        if NOT_FOR_YOU.match(text):
+            self._stop_listening("not for you")
+            return
         if HOLD_ON.match(text):  # a control word, like the wake word: not a request of its own
             self._start_listening()
             return
@@ -427,7 +437,7 @@ class DuplexController:
         self._seg.reset()
         self._set(State.IDLE)
         self._chime("end")
-        self._emit("timeout")
+        self._emit("timeout", detail=why)
         log.info("back to wake-word-only (%s)", why)
 
     def _chime(self, kind: str) -> None:

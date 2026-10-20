@@ -100,7 +100,7 @@ async def orb(args: argparse.Namespace, brain: LocalBrain) -> None:
     holder: dict = {}
 
     def features_msg() -> dict:
-        items = [f for f in describe(licensed=False) if f["id"] != "push_to_talk"]  # Pro app only: needs its hotkey service
+        items = [f for f in describe(licensed=False) if f["id"] not in ("push_to_talk", "diagnostics")]  # Pro app only
         for f in items:  # the live follow-up switch, not the saved default
             if f["id"] == "followup" and "duplex" in holder:
                 f["on"] = holder["duplex"].followup

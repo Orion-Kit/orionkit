@@ -233,6 +233,7 @@ class SpeakResult:
     interrupted: bool
     sentences: int
     first_audio_ms: Optional[float]  # first token in -> first PCM queued
+    first_audio_at: Optional[float] = None  # time.monotonic() when that first PCM was queued
 
 
 class TTSEngine:
@@ -347,7 +348,7 @@ class TTSEngine:
                     await tokens.aclose()  # halts the upstream generator (e.g. the LLM stream)
 
         producer = asyncio.create_task(produce())
-        count, first_ms = 0, None
+        count, first_ms, first_at = 0, None, None
         try:
             while (sentence := await sentences.get()) is not None:
                 if not re.search(r"\w", sentence):  # "---", "-", "…": nothing to say, and Kokoro rejects them
@@ -360,9 +361,9 @@ class TTSEngine:
                 self._player.enqueue(pcm)
                 count += 1
                 if first_ms is None and started:
-                    first_ms = (time.perf_counter() - started[0]) * 1000
+                    first_ms, first_at = (time.perf_counter() - started[0]) * 1000, time.monotonic()
             await self._player.drain()
-            return SpeakResult(False, count, first_ms)
+            return SpeakResult(False, count, first_ms, first_at)
         finally:
             producer.cancel()
 

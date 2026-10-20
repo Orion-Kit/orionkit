@@ -31,7 +31,7 @@ class Feature:
     description: str
     star: str                     # constellation star that represents it
     pro: bool
-    kind: str                     # info | toggle | keys | settings | addon | pair | mcp_add
+    kind: str                     # info | toggle | keys | settings | addon | pair | mcp_add | diagnostics
     env: str | None = None        # toggle: the env var holding "1"/"0"
     default_on: bool = False
     fields: tuple[Field, ...] = field(default_factory=tuple)
@@ -85,6 +85,10 @@ FEATURES: tuple[Feature, ...] = (
     Feature("notion", "Notion", "Search, read and edit your Notion pages.", "Saiph", True, "addon",
             fields=(Field("NOTION_TOKEN", "Notion integration secret"),), how="Create an internal integration at notion.so/profile/integrations."),
     Feature("git", "Git", "Status, diffs and history for your workspace repository.", "Saiph", True, "addon"),
+    Feature("diagnostics", "Help improve OrionKit", "Off unless you turn it on. Sends crash summaries and “Hey Orion” "
+            "accuracy counts once a day; never audio, words, keys or emails. See exactly what's sent first.", "Bellatrix", False,
+            "diagnostics", env="ORIONKIT_DIAGNOSTICS",
+            how="Kept on this computer for 14 days. Linked only to a random install ID you can reset, not to your license or email."),
     Feature("mcp", "Add an MCP server", "Plug in any Model Context Protocol server: its tools become Orion's tools.", "Saiph", True,
             "mcp_add", fields=(Field("MCP_NAME", "Name", secret=False, placeholder="Name, e.g. linear"),
                                Field("MCP_TARGET", "URL or command", secret=False, placeholder="https://…/mcp  or  npx -y @scope/server")),
@@ -96,7 +100,7 @@ BY_ID = {f.id: f for f in FEATURES}
 def is_on(f: Feature, installed_addons: set[str] | None = None) -> bool:
     if f.kind == "info":
         return True
-    if f.kind == "toggle":
+    if f.kind in ("toggle", "diagnostics"):
         return os.environ.get(f.env or "", "1" if f.default_on else "0") == "1"
     if f.kind == "addon":
         return f.id in (installed_addons or set())
@@ -114,7 +118,7 @@ def describe(licensed: bool, installed_addons: set[str] | None = None,
     for f in FEATURES:
         locked = f.pro and not licensed
         on = (not locked) and is_on(f, installed_addons)
-        status = "locked" if locked else ("on" if on else ("off" if f.kind == "toggle" else "add" if f.kind == "mcp_add" else
+        status = "locked" if locked else ("on" if on else ("off" if f.kind in ("toggle", "diagnostics") else "add" if f.kind == "mcp_add" else
                                                               "customize" if f.kind == "settings" else "set up"))
         out.append({"id": f.id, "name": f.name, "description": f.description, "star": f.star, "pro": f.pro, "kind": f.kind,
                     "locked": locked, "on": on, "status": status, "how": f.how,

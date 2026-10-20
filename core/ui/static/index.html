@@ -148,6 +148,7 @@
   .pay li::before { content: "✦ "; color: var(--magenta); }
   .report textarea { width: 100%; min-height: 90px; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: #080a15; color: var(--text); font: inherit; resize: vertical; }
   .report pre { max-height: 260px; overflow: auto; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: #080a15; font: 11.5px/1.45 ui-monospace, Menlo, monospace; white-space: pre-wrap; color: var(--dim); }
+  .diag-body { max-height: 240px; overflow: auto; padding: 10px; border-radius: 10px; border: 1px solid var(--line); background: #080a15; font: 11.5px/1.45 ui-monospace, Menlo, monospace; white-space: pre-wrap; color: var(--dim); margin: 0; }
   .report label { display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--dim); }
   .banner { position: relative; z-index: 3; display: flex; align-items: center; gap: 10px; margin: 0 auto; width: min(760px, 94vw);
     padding: 10px 14px; border-radius: 14px; border: 1px solid rgba(196,181,253,.3); background: rgba(24,18,48,.92); font-size: 13.5px; }
@@ -409,6 +410,11 @@ function handle(m) {
       if (m.ok) toast(m.message);
       break;
     }
+    case "diagnostics_result":
+      diagPreview = m.action === "view" && m.ok ? m.message : "";
+      lastResult.diagnostics = diagPreview ? { ok: true, message: "This is exactly what would be sent." } : m;
+      renderFeatures();
+      break;
     case "paywall":
       openPaywall(m.id);
       break;
@@ -512,7 +518,7 @@ $("#input").addEventListener("input", autosize);
 $("#talk").addEventListener("click", () => send({ t: "talk" }));
 
 /* ---------------- features & upgrade ---------------- */
-let featureItems = [], licensed = true, openSetup = null;
+let featureItems = [], licensed = true, openSetup = null, diagPreview = "";
 const lastResult = {};
 function showResult(id) {
   const line = document.querySelector(`[data-msg="${CSS.escape(id)}"]`), m = lastResult[id];
@@ -536,7 +542,19 @@ function renderFeatures() {
         ${f.how ? `<div class="how">${esc(f.how)}</div>` : ""}
         ${f.kind !== "pair" ? `<button class="btn primary" type="submit">${f.kind === "addon" ? "Install" : f.kind === "mcp_add" ? "Test & add" : "Save"}</button>` : ""}
         <div class="msgline" data-msg="${esc(f.id)}" role="status" aria-live="polite"></div>
-      </form>` : "";
+      </form>` : openSetup === f.id && f.kind === "diagnostics" ? `
+      <div class="setup" data-diag>
+        <div class="how">${esc(f.how)}</div>
+        <div style="display:flex;flex-wrap:wrap;gap:8px">
+          <button class="btn primary" type="button" data-diag-action="${f.on ? "off" : "on"}" aria-pressed="${f.on}">${f.on ? "Turn off" : "Turn on"}</button>
+          <button class="btn" type="button" data-diag-action="view">View diagnostics</button>
+          <button class="btn" type="button" data-diag-action="send" ${f.on ? "" : "disabled"}>Send report now</button>
+          <button class="btn" type="button" data-diag-action="delete">Delete diagnostics</button>
+          <button class="btn" type="button" data-diag-action="reset">Reset install ID</button>
+        </div>
+        <pre class="diag-body" ${diagPreview ? "" : "hidden"}>${esc(diagPreview)}</pre>
+        <div class="msgline" data-msg="${esc(f.id)}" role="status" aria-live="polite"></div>
+      </div>` : "";
     return `<div class="tile ${f.locked ? "locked" : ""}" data-feature="${esc(f.id)}" role="button" tabindex="0" aria-label="${esc(f.name)}: ${esc(f.status)}">
       <div class="top"><span class="star" style="color:${STAR_COLOR[f.star] || "#fff"};background:${STAR_COLOR[f.star] || "#fff"}"></span>${esc(f.name)}${chip}</div>
       <p>${esc(f.description)}</p>${setup}</div>`;
@@ -550,12 +568,19 @@ function activateTile(id) {
   if (f.locked) { openPaywall(id); return; }
   if (f.kind === "toggle") { send({ t: "feature", id, on: !f.on }); return; }
   if (f.kind === "info") { toast(`${f.name} is built in and always on.`); return; }
+  if (f.kind === "diagnostics") { openSetup = openSetup === id ? null : id; renderFeatures(); return; }
   if (f.kind === "mcp_installed") { if (confirm(`Remove the ${f.name.replace("MCP · ", "")} server?`)) send({ t: "feature", id, on: false }); return; }
   openSetup = openSetup === id ? null : id; renderFeatures();
   const first = document.querySelector(`[data-setup="${CSS.escape(id)}"] input`); if (first) first.focus();
 }
 $("#feature-grid").addEventListener("click", (e) => {
-  if (e.target.closest("form")) return;
+  const diag = e.target.closest("[data-diag-action]");
+  if (diag) {
+    const action = diag.dataset.diagAction;
+    if (action === "delete" && !confirm("Delete the diagnostics kept on this computer, and ask our server to delete what this install sent?")) return;
+    delete lastResult.diagnostics; send({ t: "diagnostics", action }); return;
+  }
+  if (e.target.closest("form, [data-diag]")) return;
   const tile = e.target.closest("[data-feature]"); if (tile) activateTile(tile.dataset.feature);
 });
 $("#feature-grid").addEventListener("keydown", (e) => {
