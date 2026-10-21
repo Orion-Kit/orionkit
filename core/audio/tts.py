@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import re
 import threading
 import time
@@ -153,10 +154,23 @@ class AudioPlayer:
             return
         import sounddevice as sd
 
-        self._stream = sd.OutputStream(
-            samplerate=self.sample_rate, channels=1, dtype="float32",
-            blocksize=self._block, latency="low", device=self._device, callback=self._callback,
-        )
+        def stream(rate: int, callback: Callable) -> object:
+            return sd.OutputStream(samplerate=rate, channels=1, dtype="float32", blocksize=self._block * rate // self.sample_rate,
+                                   latency="low", device=self._device, callback=callback)
+        try:
+            self._stream = stream(self.sample_rate, self._callback)
+        except sd.PortAudioError:  # many Windows/USB outputs are 44.1/48 kHz only: play at their rate, resampled
+            native = int(sd.query_devices(self._device, "output")["default_samplerate"])
+            if native == self.sample_rate:
+                raise
+            g = math.gcd(self.sample_rate, native)
+            up, down = native // g, self.sample_rate // g
+
+            def resampled(outdata: np.ndarray, frames: int, time_info: object, status: object) -> None:
+                y = self._resample(self._pull(max(1, round(frames * self.sample_rate / native))), up, down)
+                outdata[:, 0] = np.pad(y[:frames], (0, max(0, frames - len(y))))
+            self._stream = stream(native, resampled)
+            log.info("speaker can't play %d Hz; playing at %d Hz, resampled", self.sample_rate, native)
         self._stream.start()
 
     async def stop(self) -> None:

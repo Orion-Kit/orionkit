@@ -164,10 +164,22 @@ class DuplexController:
             elif isinstance(event, Utterance) and self.state is State.SPEAKING and self._speaker_paused:
                 await self._decide_interruption(event)
             elif isinstance(event, Utterance) and self.state is State.LISTENING:
-                await self._handle_utterance(event)
+                await self._contained(self._handle_utterance(event))
             elif isinstance(event, Utterance) and self.state is State.IDLE and self._cfg.stt_wake \
                     and event.duration_s <= self._cfg.stt_wake_max_s:
-                await self._stt_wake(event)
+                await self._contained(self._stt_wake(event))
+
+    async def _contained(self, turn: Awaitable[None]) -> None:
+        """One failed turn (a transcription error, say) must not end the loop: that would leave Orion deaf
+        until restart. Log it and go back to a clean state."""
+        try:
+            await turn
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("handling an utterance failed")
+            if self.state is State.THINKING:
+                self._stop_listening("couldn't transcribe")
 
     async def _timeout_loop(self) -> None:
         while True:
@@ -263,7 +275,7 @@ class DuplexController:
         if audio is None or len(audio) < 0.3 * 16000:
             self._stop_listening("push-to-talk: nothing held")
             return
-        self._ptt_task = asyncio.ensure_future(self._handle_utterance(Utterance(audio)))
+        self._ptt_task = asyncio.ensure_future(self._contained(self._handle_utterance(Utterance(audio))))
 
     @property
     def ptt_held(self) -> bool:

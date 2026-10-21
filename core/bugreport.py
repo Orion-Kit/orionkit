@@ -23,7 +23,7 @@ from core.version import __version__
 SERVER = os.environ.get("ORIONKIT_LICENSE_SERVER", "https://orionkit-licensing.fly.dev")
 SUPPORT = "support@orion-kit.com"
 SECRETS = [
-    (re.compile(r"sk-ant-[A-Za-z0-9_\-]{10,}"), "[anthropic-key]"), (re.compile(r"AIza[0-9A-Za-z_\-]{20,}"), "[google-key]"),
+    (re.compile(r"sk-ant-[A-Za-z0-9_\-]{10,}"), "[anthropic-key]"), (re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}"), "[api-key]"), (re.compile(r"AIza[0-9A-Za-z_\-]{20,}"), "[google-key]"),
     (re.compile(r"\bAQ\.[A-Za-z0-9_\-]{20,}"), "[google-key]"), (re.compile(r"\bre_[A-Za-z0-9]{16,}"), "[resend-key]"),
     (re.compile(r"github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}"), "[github-token]"),
     (re.compile(r"eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"), "[token]"),
@@ -32,6 +32,7 @@ SECRETS = [
     (re.compile(r"\b(ntn|secret)_[A-Za-z0-9]{20,}"), "[notion-token]"), (re.compile(r"\bBSA[A-Za-z0-9_\-]{20,}"), "[brave-key]"),
     (re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+"), "[email]"),
     (re.compile(r"/Users/[^/\s]+"), "/Users/[you]"), (re.compile(r"/home/[^/\s]+"), "/home/[you]"),
+    (re.compile(r"(?i)\b([A-Z]:\\+Users\\+)[^\\\s]+"), r"\1[you]"), (re.compile(r"(?i)\b[\w-]+\.[\w-]+\.ts\.net\b"), "[tailnet-host]"),
 ]
 
 

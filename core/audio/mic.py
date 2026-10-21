@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
+import math
 import threading
+import time
 from collections.abc import Callable
 from typing import Optional
 
@@ -10,6 +14,8 @@ import numpy as np
 
 SAMPLE_RATE = 16_000
 FRAME_SAMPLES = 512  # 32 ms: Silero VAD's native frame at 16 kHz
+STALL_S = 2.5        # no callback for this long while running: the device went away (unplugged, sleep, switched)
+log = logging.getLogger("orionkit.mic")
 
 
 class MicError(RuntimeError):
@@ -73,6 +79,9 @@ class MicStream:
         self.peak: float = 0.0  # loudest frame so far: 0.0 means no audio at all is arriving
         self.on_silent: Callable[[str], None] | None = None
         self.muted = False     # privacy mute: capture continues, but everyone downstream hears silence
+        self._rate = SAMPLE_RATE   # the device's rate; resampled to 16 kHz when it can't capture at 16 kHz
+        self._last_audio = 0.0
+        self._watchdog: Optional[asyncio.Task[None]] = None
 
     def subscribe(self) -> asyncio.Queue[np.ndarray]:
         q: asyncio.Queue[np.ndarray] = asyncio.Queue(self._queue_frames)
@@ -89,20 +98,49 @@ class MicStream:
         import sounddevice as sd
 
         try:
-            self._stream = sd.InputStream(
-                samplerate=SAMPLE_RATE,
-                channels=1,
-                dtype="int16",
-                blocksize=FRAME_SAMPLES,
-                latency="low",
-                device=self._device,
-                callback=self._callback,
-            )
-            self._stream.start()
+            self._open(sd)
         except sd.PortAudioError as e:
             raise MicError(f"No microphone available ({e}). Pick one with --input N (see python main.py "
                            "--list-devices), or use --text for typed chat.") from e
         self._loop.call_later(6, self._check_silent)
+        self._watchdog = asyncio.create_task(self._watch(sd))
+
+    def _open(self, sd: object) -> None:
+        """16 kHz if the device does it; otherwise its own rate, resampled (many USB and Windows mics are 44.1/48 kHz only)."""
+        def stream(rate: int) -> object:
+            return sd.InputStream(samplerate=rate, channels=1, dtype="int16", blocksize=FRAME_SAMPLES * rate // SAMPLE_RATE,
+                                  latency="low", device=self._device, callback=self._callback)
+        try:
+            s, self._rate = stream(SAMPLE_RATE), SAMPLE_RATE
+        except sd.PortAudioError:
+            native = int(sd.query_devices(self._device, "input")["default_samplerate"])
+            if native == SAMPLE_RATE:
+                raise
+            s, self._rate = stream(native), native
+            log.info("microphone can't capture at 16 kHz; capturing at %d Hz and resampling", native)
+        self._last_audio = time.monotonic()
+        s.start()
+        self._stream = s
+
+    async def _watch(self, sd: object) -> None:
+        """A stream whose device disappears just stops calling back: reopen it, and tell the user if that fails."""
+        told = False
+        while self._stream is not None:
+            await asyncio.sleep(1.0)
+            if self._stream is None or time.monotonic() - self._last_audio < STALL_S:
+                continue
+            log.warning("no audio from the microphone for %.0f s; reopening it", time.monotonic() - self._last_audio)
+            with contextlib.suppress(Exception):
+                self._stream.close()
+            try:
+                self._open(sd)
+                told = False
+            except Exception as e:  # PortAudioError, or the device index no longer exists
+                self._last_audio = time.monotonic()  # retry after another STALL_S
+                if not told and self.on_silent:
+                    self.on_silent("The microphone stopped sending audio (unplugged?). Plug it back in, or restart Orion to "
+                                   f"use another one. Typing still works. ({type(e).__name__})")
+                told = True
 
     def _check_silent(self) -> None:
         """macOS gives silence, not an error, when the terminal isn't allowed to use the mic."""
@@ -111,10 +149,15 @@ class MicStream:
                            "Privacy & Security > Microphone, then restart it. Typing still works.")
 
     async def stop(self) -> None:
+        if self._watchdog is not None:
+            self._watchdog.cancel()
+            self._watchdog = None
         if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+            stream, self._stream = self._stream, None
+            with contextlib.suppress(Exception):  # an unplugged device can fail to stop; shutting down must still finish
+                stream.stop()
+            with contextlib.suppress(Exception):
+                stream.close()
 
     async def __aenter__(self) -> "MicStream":
         await self.start()
@@ -129,7 +172,18 @@ class MicStream:
 
     def _callback(self, indata: np.ndarray, frames: int, time_info: object, status: object) -> None:
         assert self._loop is not None
-        self._loop.call_soon_threadsafe(self._ingest, indata[:, 0].copy())
+        self._last_audio = time.monotonic()
+        samples = indata[:, 0].copy()
+        if self._rate != SAMPLE_RATE:
+            g = math.gcd(SAMPLE_RATE, self._rate)
+            samples = np.clip(self._resample(samples.astype(np.float32), SAMPLE_RATE // g, self._rate // g), -32768, 32767
+                              ).astype(np.int16)
+        self._loop.call_soon_threadsafe(self._ingest, samples)
+
+    @staticmethod
+    def _resample(x: np.ndarray, up: int, down: int) -> np.ndarray:
+        from scipy.signal import resample_poly
+        return resample_poly(x, up, down)
 
     def _ingest(self, samples: np.ndarray) -> None:
         if self.muted:
@@ -146,3 +200,4 @@ class MicStream:
                     q.get_nowait()
                 q.put_nowait(frame)
         self._carry = data[n_frames * FRAME_SAMPLES:].copy()
+
