@@ -47,17 +47,27 @@ class SentenceSplitter:
         self._max_chars = max_chars
 
     def feed(self, token: str) -> Iterator[str]:
-        self._buf += token
-        while (cut := self._find_cut()) is not None:
-            chunk, self._buf = self._buf[:cut], self._buf[cut:]
-            self._first = False
-            if chunk := _clean(chunk):
-                yield chunk
+        for _, clean in self.feed_pairs(token):
+            if clean:
+                yield clean
 
     def flush(self) -> Iterator[str]:
-        chunk, self._buf = _clean(self._buf), ""
-        if chunk:
-            yield chunk
+        for _, clean in self.flush_pairs():
+            if clean:
+                yield clean
+
+    def feed_pairs(self, token: str) -> Iterator[tuple[str, str]]:
+        """Like feed(), but yields (original text, text to speak); the original keeps links, units and spacing for display."""
+        self._buf += token
+        while (cut := self._find_cut()) is not None:
+            raw, self._buf = self._buf[:cut], self._buf[cut:]
+            self._first = False
+            yield raw, _clean(raw)
+
+    def flush_pairs(self) -> Iterator[tuple[str, str]]:
+        raw, self._buf = self._buf, ""
+        if raw:
+            yield raw, _clean(raw)
 
     def _find_cut(self) -> Optional[int]:
         for m in _BOUNDARY.finditer(self._buf):
@@ -113,6 +123,7 @@ class AudioPlayer:
         self._device = device
         self._block = sample_rate * block_ms // 1000
         self._chunks: deque[np.ndarray] = deque()
+        self._on_start: deque[Optional[Callable[[], None]]] = deque()  # parallel to _chunks: run when that chunk starts playing
         self._offset = 0
         self._lock = threading.Lock()
         self._idle = asyncio.Event()
@@ -182,15 +193,18 @@ class AudioPlayer:
             self._stream.close()
             self._stream = None
 
-    def enqueue(self, pcm: np.ndarray) -> None:
+    def enqueue(self, pcm: np.ndarray, on_start: Optional[Callable[[], None]] = None) -> None:
+        """Queue audio; ``on_start`` runs on the event loop when its first sample reaches the speaker."""
         with self._lock:
             self._chunks.append(pcm.astype(np.float32, copy=False))
+            self._on_start.append(on_start)
         self._idle.clear()
 
     def flush(self) -> None:
         """Drop everything queued; the speaker goes silent within one block (~20 ms)."""
         with self._lock:
             self._chunks.clear()
+            self._on_start.clear()  # a flushed chunk was never heard, so its start callback must never run
             self._offset = 0
         self.paused = False
         self._idle.set()
@@ -206,12 +220,17 @@ class AudioPlayer:
         with self._lock:
             while filled < n and self._chunks and not self.paused:
                 head = self._chunks[0]
+                if self._offset == 0 and self._on_start[0] is not None:
+                    callback, self._on_start[0] = self._on_start[0], None
+                    if self._loop is not None:
+                        self._loop.call_soon_threadsafe(callback)
                 take = min(n - filled, len(head) - self._offset)
                 out[filled:filled + take] = head[self._offset:self._offset + take]
                 filled += take
                 self._offset += take
                 if self._offset >= len(head):
                     self._chunks.popleft()
+                    self._on_start.popleft()
                     self._offset = 0
             empty = not self._chunks and not self.paused
         self.rms = float(np.sqrt(np.mean(out ** 2))) if filled else 0.0
@@ -275,6 +294,9 @@ class TTSEngine:
         self._pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
         self._job: Optional[asyncio.Task[SpeakResult]] = None
         self._interrupted = False
+        self._captions: Optional[tuple[Callable[[str], None], Callable[[bool], None]]] = None
+        self._said = ""   # every token of the current reply
+        self._shown = ""  # the part already captioned
         self.synthesize("Ready.")  # warm-up
 
     def voices(self) -> list[str]:
@@ -330,20 +352,41 @@ class TTSEngine:
             self._job.cancel()
         self._player.flush()
 
+    def caption(self, on_text: Callable[[str], None], on_end: Callable[[bool], None]) -> None:
+        """Show the reply being spoken in step with the voice: each chunk of original text goes to ``on_text`` the moment
+        its audio starts playing, and ``on_end(interrupted)`` runs once playback has finished. Lasts for the current reply."""
+        self._captions = (on_text, on_end)
+
+    def _reveal(self, text: str) -> None:
+        if self._captions and text:
+            self._shown += text
+            self._captions[0](text)
+
     async def speak(self, tokens: AsyncIterable[str] | str) -> SpeakResult:
         """Speak a token stream (or a string) and return once playback ends or is interrupted."""
         self._interrupted = False
+        self._captions, self._said, self._shown = None, "", ""
         self._job = asyncio.create_task(self._run(_as_stream(tokens) if isinstance(tokens, str) else tokens))
+        interrupted = True
         try:
-            return await self._job
+            result = await self._job
+            interrupted = result.interrupted
+            return result
         except asyncio.CancelledError:
             if not self._interrupted:
                 raise
             return SpeakResult(True, 0, None)
+        finally:
+            if self._captions:
+                if not interrupted:  # a chunk TTS couldn't voice, or an error: the reader still gets every word
+                    self._reveal(self._said[len(self._shown):])
+                on_end = self._captions[1]
+                self._captions = None
+                on_end(interrupted)
 
     async def _run(self, tokens: AsyncIterable[str]) -> SpeakResult:
         loop = asyncio.get_running_loop()
-        sentences: asyncio.Queue[Optional[str]] = asyncio.Queue()
+        sentences: asyncio.Queue[Optional[tuple[str, str]]] = asyncio.Queue()
         started: list[float] = []
 
         async def produce() -> None:
@@ -352,10 +395,11 @@ class TTSEngine:
                 async for token in tokens:
                     if not started:
                         started.append(time.perf_counter())
-                    for s in splitter.feed(token):
-                        sentences.put_nowait(s)
-                for s in splitter.flush():
-                    sentences.put_nowait(s)
+                    self._said += token
+                    for pair in splitter.feed_pairs(token):
+                        sentences.put_nowait(pair)
+                for pair in splitter.flush_pairs():
+                    sentences.put_nowait(pair)
             finally:
                 sentences.put_nowait(None)
                 if hasattr(tokens, "aclose"):
@@ -363,8 +407,11 @@ class TTSEngine:
 
         producer = asyncio.create_task(produce())
         count, first_ms, first_at = 0, None, None
+        pending = ""  # original text of chunks with nothing to say: shown together with the next chunk that's spoken
         try:
-            while (sentence := await sentences.get()) is not None:
+            while (item := await sentences.get()) is not None:
+                raw, sentence = item
+                pending += raw
                 if not re.search(r"\w", sentence):  # "---", "-", "…": nothing to say, and Kokoro rejects them
                     continue
                 try:
@@ -372,7 +419,8 @@ class TTSEngine:
                 except ValueError as e:  # one unpronounceable chunk must not end the whole reply
                     log.warning("skipped a chunk TTS couldn't voice (%s): %r", e, sentence[:60])
                     continue
-                self._player.enqueue(pcm)
+                text, pending = pending, ""
+                self._player.enqueue(pcm, on_start=lambda text=text: self._reveal(text))
                 count += 1
                 if first_ms is None and started:
                     first_ms, first_at = (time.perf_counter() - started[0]) * 1000, time.monotonic()

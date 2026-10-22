@@ -170,22 +170,20 @@ async def orb(args: argparse.Namespace, brain: LocalBrain) -> None:
                  "providers": {"local": {"state": "closed", "label": brain.model}}, "mcp": {"tools": "Pro"}, "telemetry": {}}, keep="status")
 
     async def respond(text: str):
-        interrupted = True
-        try:
-            ui.send({"t": "event", "kind": "route", "detail": {"provider": "ollama", "model": brain.model, "tier": "fast"}})
-            async for token in brain.respond(text):
-                ui.send({"t": "token", "text": token})
-                yield token
-            interrupted = False
-        finally:
-            ui.send({"t": "reply_end", "interrupted": interrupted})
+        # The reply is shown as it's spoken, not as the model writes it (that runs a sentence or more ahead of the voice).
+        tts.caption(lambda chunk: ui.send({"t": "token", "text": chunk}),
+                    lambda interrupted: ui.send({"t": "reply_end", "interrupted": interrupted}))
+        ui.send({"t": "event", "kind": "route", "detail": {"provider": "ollama", "model": brain.model, "tier": "fast"}})
+        async for token in brain.respond(text):
+            yield token
 
     await ui.start()
     print(f"Orion is running: {ui.url}\nCtrl-C quits.")
     webbrowser.open(ui.url)
     print("Loading voice models…")
     wake = None if args.no_wake else create_wake(mic, args.wake)
-    duplex = DuplexController(SpeechSegmenter(mic), STTWorker(), TTSEngine(player, **voice_settings()), respond, wake,
+    tts = TTSEngine(player, **voice_settings())
+    duplex = DuplexController(SpeechSegmenter(mic), STTWorker(), tts, respond, wake,
                               DuplexConfig(followup=os.environ.get("ORIONKIT_FOLLOWUP") == "1"), EchoGate(mic, player))
     holder["duplex"] = duplex
     async with mic:
