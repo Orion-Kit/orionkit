@@ -197,7 +197,7 @@ class DuplexController:
         if not m or self.state is not State.IDLE:  # not addressed to us, or the keyword spotter already woke
             return
         self._emit("wake", detail="transcript")
-        log.info("wake via transcript %r", transcript.text)
+        log.info("wake via transcript (%d words)", len(transcript.text.split()))
         request = m.group(1).strip()
         if len(request.split()) >= 2:  # "Hey Orion, what's the weather?": answer straight away
             rest = Transcript(request, transcript.latency_ms, transcript.audio_s)
@@ -226,7 +226,7 @@ class DuplexController:
             return
         if followup and self._addressed is not None and not await self._addressed(text):
             if self.state is State.THINKING:
-                log.info("follow-up not meant for Orion, ignored: %r", text)
+                log.info("follow-up not meant for Orion, ignored (%d words)", len(text.split()))
                 self._stop_listening("not addressed")
             return
         if self.state is not State.THINKING:
@@ -325,8 +325,9 @@ class DuplexController:
             self._after_reply()
 
     async def announce(self, text: str) -> None:
-        """Speak something Orion starts on its own (a timer going off), after any reply in progress."""
-        while self.state in (State.THINKING, State.SPEAKING):
+        """Speak something Orion starts on its own (a timer going off), after any reply in progress, and never over the
+        user: not while they're talking, holding push-to-talk, or in a listening turn they started."""
+        while self._busy_for_announcement():
             await asyncio.sleep(0.2)
         self._emit("announce")
         self._reply_text = text
@@ -339,6 +340,11 @@ class DuplexController:
             return
         if not result.interrupted:
             self._after_reply()
+
+    def _busy_for_announcement(self) -> bool:
+        if self.state in (State.THINKING, State.SPEAKING) or self.ptt_held or self._seg.in_speech:
+            return True
+        return self.state is State.LISTENING and self._wake is not None  # a turn the user opened (it times out)
 
     def _is_echo(self) -> bool:
         if self._echo is None or not self._echo.is_echo():

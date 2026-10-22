@@ -70,7 +70,7 @@
   .composer:focus-within { border-color: var(--violet); }
   .composer textarea { flex: 1; resize: none; border: 0; outline: 0; background: none; color: var(--text); font: inherit;
     max-height: 140px; padding: 8px 0; }
-  .composer textarea::placeholder { color: #5b6080; }
+  .composer textarea::placeholder { color: #7e84a6; }
   .round { width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center; color: var(--dim); }
   .round:hover { color: var(--text); background: rgba(255,255,255,.04); }
   .send { background: linear-gradient(135deg, var(--blue), var(--magenta)); color: #fff; }
@@ -92,11 +92,22 @@
   .msg .who { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--dim); }
   .msg.user .text { color: var(--cyan); }
   .row { display: flex; gap: 8px; padding: 6px 0; border-bottom: 1px solid #141729; }
-  .row time { color: #5b6080; font-variant-numeric: tabular-nums; flex: none; }
+  .row time { color: var(--dim); font-variant-numeric: tabular-nums; flex: none; }
   .kv { display: grid; grid-template-columns: 110px 1fr; gap: 6px 10px; margin-bottom: 16px; }
   .kv span:nth-child(odd) { color: var(--dim); }
   h3 { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); margin: 6px 0 10px; font-weight: 600; }
   @media (prefers-reduced-motion: reduce) { #say .cursor { animation: none; } }
+  /* More contrast when the system asks for it; Windows High Contrast gets visible control edges */
+  @media (prefers-contrast: more) {
+    :root { --dim: #c3c8e0; --line: #4a5078; }
+    .composer textarea::placeholder, .row time { color: #aab0cc; }
+    #orb { opacity: .55; }
+  }
+  @media (forced-colors: active) {
+    .round, .tab, .close-drawer, .tile, .chip, .quick button, .wizard .step { border: 1px solid ButtonText; }
+    .send, .btn.primary { background: ButtonText; color: ButtonFace; forced-color-adjust: none; }
+    #say .cursor { background: CanvasText; }
+  }
 
   /* Companion devices: tap to start audio (browsers need a tap before using the mic and speaker) */
   #start-audio { position: fixed; inset: 0; z-index: 30; display: grid; place-items: center; background: rgba(5,6,13,.55); backdrop-filter: blur(4px); }
@@ -370,7 +381,8 @@ function setConn(ok) {
 }
 
 /* ---------------- messages from Orion ---------------- */
-const STATE_TEXT = { idle: "Say “Hey Orion”", listening: "Listening", thinking: "Thinking", speaking: "Speaking", muted: "Microphone muted" };
+const STATE_TEXT = { idle: "Say “Hey Orion”", listening: "Listening", thinking: "Thinking", speaking: "Speaking", muted: "Microphone muted",
+  text: "Voice is off · type below" };
 let replyText = "", replying = false;
 function handle(m) {
   switch (m.t) {
@@ -617,7 +629,12 @@ function closeModals() {
 }
 document.querySelectorAll("[data-close-modal]").forEach((b) => b.addEventListener("click", closeModals));
 document.querySelectorAll(".modal").forEach((m) => m.addEventListener("click", (e) => { if (e.target === m) closeModals(); }));
-document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModals(); });
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape") return;
+  const open = document.querySelector(".modal:not([hidden])") || $("#drawer").classList.contains("open");
+  if (open) closeModals();
+  else if (live && live.state === "speaking") send({ t: "stop" });  // Esc stops Orion talking, as in the terminal app
+});
 $("#features-btn").addEventListener("click", () => { send({ t: "features" }); openModal("#features"); });
 function openPaywall(id) {
   const f = featureItems.find((x) => x.id === id);

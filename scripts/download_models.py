@@ -49,6 +49,14 @@ def main() -> int:
                 m.name = str(Path(*parts))
                 t.extract(m, kws, filter="data")
         archive.unlink()
+    whisper = MODELS / "whisper"
+    try:  # speech recognition: otherwise it downloads on the first voice start, which fails offline or behind a proxy
+        from faster_whisper.utils import download_model
+        for size in sys.argv[1:] or ["base.en"]:
+            print(f"↓ Whisper {size}")
+            download_model(size, cache_dir=str(whisper))
+    except ImportError:
+        print("Whisper downloads on first run (install the requirements first to fetch it now).")
     print("Models ready.")
     return 0
 

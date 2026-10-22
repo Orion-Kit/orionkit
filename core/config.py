@@ -21,6 +21,25 @@ def load_dotenv(path: Path = PROJECT_ROOT / ".env") -> None:
         os.environ.setdefault(key.strip(), value.strip().strip("'\""))
 
 
+def is_local(url: str | None) -> bool:
+    """A loopback, private-network or .local address (Ollama, Home Assistant, a Hue bridge). A corporate proxy can't
+    reach those, so clients for them ignore HTTP(S)_PROXY and the system proxy."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    if not url:
+        return False
+    host = (urlsplit(url if "://" in url else f"//{url}").hostname or "").lower()
+    if not host:
+        return False
+    if host == "localhost" or host.endswith((".local", ".lan", ".home.arpa", ".internal")) or ("." not in host and ":" not in host):
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private or ip.is_link_local
+
+
 def _paths(var: str, default: list[Path]) -> list[Path]:
     raw = os.environ.get(var)
     return [Path(p).expanduser() for p in raw.split(os.pathsep) if p] if raw else default

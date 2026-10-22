@@ -7,6 +7,7 @@ import logging
 import math
 import threading
 import time
+import weakref
 from collections.abc import Callable
 from typing import Optional
 
@@ -20,6 +21,32 @@ log = logging.getLogger("orionkit.mic")
 
 class MicError(RuntimeError):
     """No usable microphone; the message says what to do."""
+
+_OPEN: "weakref.WeakSet[object]" = weakref.WeakSet()  # the live MicStream and AudioPlayer, for refresh_devices()
+_refresh_lock = threading.Lock()
+
+def refresh_devices(sd: object) -> dict[object, Exception]:
+    """A device went away (a Bluetooth headset switched off, a USB mic unplugged). PortAudio only knows the devices it
+    saw when it started, so reopening alone would find the old one again. Close every open stream, re-scan, and reopen
+    each on the current default (or the device it was given). Returns the streams that couldn't reopen."""
+    with _refresh_lock:
+        users = list(_OPEN)
+        for u in users:
+            u._close_stream()  # type: ignore[attr-defined]
+        if hasattr(sd, "_terminate"):
+            try:
+                sd._terminate()  # type: ignore[attr-defined]
+                sd._initialize()  # type: ignore[attr-defined]
+            except Exception as e:
+                log.warning("couldn't re-scan audio devices: %s", e)
+        failed: dict[object, Exception] = {}
+        for u in users:
+            try:
+                u._open(sd)  # type: ignore[attr-defined]
+            except Exception as e:
+                failed[u] = e
+        log.info("audio devices re-scanned; %d of %d streams reopened", len(users) - len(failed), len(users))
+        return failed
 
 
 class RingBuffer:
@@ -82,6 +109,7 @@ class MicStream:
         self._rate = SAMPLE_RATE   # the device's rate; resampled to 16 kHz when it can't capture at 16 kHz
         self._last_audio = 0.0
         self._watchdog: Optional[asyncio.Task[None]] = None
+        self._running = False
 
     def subscribe(self) -> asyncio.Queue[np.ndarray]:
         q: asyncio.Queue[np.ndarray] = asyncio.Queue(self._queue_frames)
@@ -102,6 +130,8 @@ class MicStream:
         except sd.PortAudioError as e:
             raise MicError(f"No microphone available ({e}). Pick one with --input N (see python main.py "
                            "--list-devices), or use --text for typed chat.") from e
+        self._running = True
+        _OPEN.add(self)
         self._loop.call_later(6, self._check_silent)
         self._watchdog = asyncio.create_task(self._watch(sd))
 
@@ -122,25 +152,30 @@ class MicStream:
         s.start()
         self._stream = s
 
-    async def _watch(self, sd: object) -> None:
-        """A stream whose device disappears just stops calling back: reopen it, and tell the user if that fails."""
-        told = False
-        while self._stream is not None:
-            await asyncio.sleep(1.0)
-            if self._stream is None or time.monotonic() - self._last_audio < STALL_S:
-                continue
-            log.warning("no audio from the microphone for %.0f s; reopening it", time.monotonic() - self._last_audio)
+    def _close_stream(self) -> None:
+        stream, self._stream = self._stream, None
+        if stream is not None:
             with contextlib.suppress(Exception):
-                self._stream.close()
-            try:
-                self._open(sd)
+                stream.close()
+
+    async def _watch(self, sd: object) -> None:
+        """A stream whose device disappears just stops calling back: re-scan the devices and reopen (on the new default
+        if it was using the default), and tell the user if there's no microphone left."""
+        told = False
+        while self._running:
+            await asyncio.sleep(1.0)
+            if not self._running or time.monotonic() - self._last_audio < STALL_S:
+                continue
+            log.warning("no audio from the microphone for %.0f s; re-scanning devices", time.monotonic() - self._last_audio)
+            failed = await asyncio.to_thread(refresh_devices, sd)
+            if self not in failed:
                 told = False
-            except Exception as e:  # PortAudioError, or the device index no longer exists
-                self._last_audio = time.monotonic()  # retry after another STALL_S
-                if not told and self.on_silent:
-                    self.on_silent("The microphone stopped sending audio (unplugged?). Plug it back in, or restart Orion to "
-                                   f"use another one. Typing still works. ({type(e).__name__})")
-                told = True
+                continue
+            self._last_audio = time.monotonic()  # retry after another STALL_S
+            if not told and self.on_silent:
+                self.on_silent("The microphone stopped sending audio (unplugged?). Plug it back in, or restart Orion to "
+                               f"use another one. Typing still works. ({type(failed[self]).__name__})")
+            told = True
 
     def _check_silent(self) -> None:
         """macOS gives silence, not an error, when the terminal isn't allowed to use the mic."""
@@ -149,6 +184,8 @@ class MicStream:
                            "Privacy & Security > Microphone, then restart it. Typing still works.")
 
     async def stop(self) -> None:
+        self._running = False
+        _OPEN.discard(self)
         if self._watchdog is not None:
             self._watchdog.cancel()
             self._watchdog = None

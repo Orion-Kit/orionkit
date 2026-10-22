@@ -5,6 +5,7 @@ Sentence N+1 is synthesized while sentence N plays, so time-to-first-audio is on
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import math
 import re
@@ -15,11 +16,11 @@ from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import numpy as np
 
-from .mic import SAMPLE_RATE, RingBuffer
+from .mic import _OPEN, SAMPLE_RATE, STALL_S, RingBuffer, refresh_devices
 
 MODELS_DIR = Path(__file__).resolve().parents[2] / "models"
 log = logging.getLogger("orionkit.tts")
@@ -139,6 +140,8 @@ class AudioPlayer:
         # What actually went to the speaker, at the mic's 16 kHz, for echo detection.
         self.reference = RingBuffer(int(SAMPLE_RATE * 2.0))
         self.paused = False
+        self._last_pull = 0.0
+        self._watchdog: Optional[asyncio.Task[None]] = None
 
     @property
     def playing(self) -> bool:
@@ -164,7 +167,11 @@ class AudioPlayer:
             self._headless = asyncio.create_task(self._headless_clock())
             return
         import sounddevice as sd
+        self._open(sd)
+        _OPEN.add(self)
+        self._watchdog = asyncio.create_task(self._watch(sd))
 
+    def _open(self, sd: Any) -> None:
         def stream(rate: int, callback: Callable) -> object:
             return sd.OutputStream(samplerate=rate, channels=1, dtype="float32", blocksize=self._block * rate // self.sample_rate,
                                    latency="low", device=self._device, callback=callback)
@@ -182,16 +189,39 @@ class AudioPlayer:
                 outdata[:, 0] = np.pad(y[:frames], (0, max(0, frames - len(y))))
             self._stream = stream(native, resampled)
             log.info("speaker can't play %d Hz; playing at %d Hz, resampled", self.sample_rate, native)
+        self._last_pull = time.monotonic()
         self._stream.start()
+
+    def _close_stream(self) -> None:
+        stream, self._stream = self._stream, None
+        if stream is not None:
+            for step in (stream.stop, stream.close):
+                with contextlib.suppress(Exception):  # a device that's gone can fail to stop; carry on regardless
+                    step()
+
+    async def _watch(self, sd: Any) -> None:
+        """Bluetooth headphones switched off: the stream stops asking for audio and a reply would wait forever to
+        finish. Re-scan the devices and carry on through the new default output."""
+        while self in _OPEN:
+            await asyncio.sleep(1.0)
+            if self not in _OPEN or time.monotonic() - self._last_pull < STALL_S:
+                continue
+            log.warning("the speaker stopped playing for %.0f s; re-scanning devices", time.monotonic() - self._last_pull)
+            failed = await asyncio.to_thread(refresh_devices, sd)
+            if self in failed:
+                self._last_pull = time.monotonic()  # retry after another STALL_S
+                log.error("no speaker to play on: %s", failed[self])
+                self.flush()  # nothing can play this, so don't leave the reply waiting for it
 
     async def stop(self) -> None:
         self.flush()
+        _OPEN.discard(self)
+        if self._watchdog is not None:
+            self._watchdog.cancel()
+            self._watchdog = None
         if self._headless:
             self._headless.cancel()
-        if self._stream is not None:
-            self._stream.stop()
-            self._stream.close()
-            self._stream = None
+        self._close_stream()
 
     def enqueue(self, pcm: np.ndarray, on_start: Optional[Callable[[], None]] = None) -> None:
         """Queue audio; ``on_start`` runs on the event loop when its first sample reaches the speaker."""
@@ -215,6 +245,7 @@ class AudioPlayer:
         await self._idle.wait()
 
     def _pull(self, n: int) -> np.ndarray:
+        self._last_pull = time.monotonic()
         out = np.zeros(n, dtype=np.float32)
         filled = 0
         with self._lock:
@@ -417,7 +448,7 @@ class TTSEngine:
                 try:
                     pcm = await loop.run_in_executor(self._pool, self.synthesize, sentence)
                 except ValueError as e:  # one unpronounceable chunk must not end the whole reply
-                    log.warning("skipped a chunk TTS couldn't voice (%s): %r", e, sentence[:60])
+                    log.warning("skipped a %d-character chunk TTS couldn't voice (%s)", len(sentence), e)
                     continue
                 text, pending = pending, ""
                 self._player.enqueue(pcm, on_start=lambda text=text: self._reveal(text))

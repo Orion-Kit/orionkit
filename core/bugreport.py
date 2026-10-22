@@ -49,10 +49,21 @@ def redact(text: str) -> str:
     return text
 
 
+_WORDS_IN_OLD_LOGS = ("wake via transcript '", "not meant for Orion, ignored: '", "TTS couldn't voice (", " entities=", " arguments=",
+                      " preview=")
+
+def _without_words(line: str) -> str:
+    """Logs from before 1.0.23 recorded some spoken words and tool arguments; the conversation is opt-in, so cut those."""
+    for marker in _WORDS_IN_OLD_LOGS:
+        rest = line.split(marker, 1)[-1]
+        if marker in line and not re.match(r"'(keys: |\d+ chars')", rest):
+            line = line.split(marker, 1)[0] + marker.rstrip("'(= ") + " [words removed]"
+    return line
+
 def collect(description: str, status: dict[str, Any] | None = None, conversation: list[str] | None = None,
             log_lines: int = 200) -> str:
     log = STATE_DIR / "logs" / "orionkit.log"
-    tail = log.read_text(errors="replace").splitlines()[-log_lines:] if log.is_file() else []
+    tail = [_without_words(x) for x in log.read_text(errors="replace").splitlines()[-log_lines:]] if log.is_file() else []
     parts = [
         f"# OrionKit bug report\n\n**What happened**\n\n{description.strip() or '(no description)'}\n",
         "## Environment",
