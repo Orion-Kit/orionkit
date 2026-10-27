@@ -102,6 +102,9 @@ class Hotkeys:
                 self.stop()
                 self.status, self.problem = "needs permission", PERMISSION_HELP
                 return False
+        except ImportError:  # not installed by default on Linux: its evdev dependency has no wheels and needs a compiler
+            return self._unavailable("it needs pynput, which builds from source on Linux: sudo apt install build-essential "
+                                     "python3-dev, then .venv/bin/pip install pynput, and restart Orion")
         except ValueError as e:
             return self._unavailable(f"can't read the hotkey setting ({e}); check ORIONKIT_PTT_KEY / ORIONKIT_MUTE_KEY")
         except Exception as e:  # no display, no X server, missing backend…

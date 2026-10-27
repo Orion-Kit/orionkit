@@ -162,8 +162,20 @@ class KeywordWakeDetector:
                     await self.events.put(WakeEvent(self._name, 1.0))
 
 
+# ORIONKIT_WAKE_SENSITIVITY: "low" for a noisy room or a TV (fewer false wakes, and no wake from transcripts),
+# "high" for a quiet room or a far-away mic. Thresholds per backend: (keyword spotter, openWakeWord).
+SENSITIVITY = {"low": (0.12, 0.7), "normal": (0.05, 0.5), "high": (0.03, 0.35)}
+
+
+def sensitivity() -> str:
+    import os
+    value = os.environ.get("ORIONKIT_WAKE_SENSITIVITY", "normal").strip().lower()
+    return value if value in SENSITIVITY else "normal"
+
+
 def create_wake(mic: MicStream, spec: str = DEFAULT_MODEL, threshold: float | None = None) -> "KeywordWakeDetector | WakeWordDetector":
     """A phrase ("hey orion") uses the keyword spotter; a model name or .onnx/.tflite path uses openWakeWord."""
+    kws, oww = SENSITIVITY[sensitivity()]
     if spec.endswith((".onnx", ".tflite")) or "_" in spec:
-        return WakeWordDetector(mic, spec, 0.5 if threshold is None else threshold)
-    return KeywordWakeDetector(mic, spec, 0.05 if threshold is None else threshold)
+        return WakeWordDetector(mic, spec, oww if threshold is None else threshold)
+    return KeywordWakeDetector(mic, spec, kws if threshold is None else threshold)

@@ -37,7 +37,7 @@ class STTWorker:
             device = "cuda" if _cuda_available() else "cpu"
         self.device = device
         self._model = WhisperModel(
-            model, device=device, compute_type=compute_type or ("float16" if device == "cuda" else "int8"),
+            local_model(model), device=device, compute_type=compute_type or ("float16" if device == "cuda" else "int8"),
             cpu_threads=cpu_threads, download_root=str(MODELS_DIR),
         )
         self._language = language
@@ -65,6 +65,21 @@ class STTWorker:
 
     async def transcribe(self, audio: np.ndarray) -> Transcript:
         return await asyncio.get_running_loop().run_in_executor(self._pool, self._transcribe_sync, audio)
+
+
+def local_model(model: str) -> str:
+    """The downloaded copy of ``model`` if there is one, else ``model`` (which downloads it).
+
+    Given only a name, faster-whisper asks huggingface.co for the latest revision on every start, even when the model
+    is already here: that sends a request each time, and a captive portal or a network that drops packets made voice
+    hang for minutes (a proxy that cut the connection crashed it). A model that's been downloaded never needs the network."""
+    if "/" in model or Path(model).exists():
+        return model
+    from faster_whisper.utils import download_model
+    try:
+        return download_model(model, local_files_only=True, cache_dir=str(MODELS_DIR))
+    except FileNotFoundError:  # not downloaded yet (huggingface_hub's LocalEntryNotFoundError): fetch it now
+        return model
 
 
 def _cuda_available() -> bool:
