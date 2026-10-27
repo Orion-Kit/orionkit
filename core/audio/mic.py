@@ -49,6 +49,21 @@ def refresh_devices(sd: object) -> dict[object, Exception]:
         return failed
 
 
+def silent_mic_help(platform: str | None = None) -> str:
+    """macOS and Windows both deliver silence, not an error, when the microphone is blocked by privacy settings."""
+    import sys
+    p = platform or sys.platform
+    if p == "darwin":
+        where = ("allow your terminal app (or VS Code, if you started Orion there) in System Settings > Privacy & Security > "
+                 "Microphone, then quit and reopen it")
+    elif p.startswith("win"):
+        where = ("turn on Settings > Privacy & security > Microphone > Microphone access and \"Let desktop apps access your "
+                 "microphone\", then restart Orion")
+    else:
+        where = "check the input device and its volume in your sound settings (or pavucontrol), or pick one with --input N"
+    return f"The microphone is completely silent. To fix it, {where}. Typing still works."
+
+
 class RingBuffer:
     """Fixed-size circular buffer of int16 samples (the 'pre-roll' of recent audio)."""
 
@@ -180,8 +195,7 @@ class MicStream:
     def _check_silent(self) -> None:
         """macOS gives silence, not an error, when the terminal isn't allowed to use the mic."""
         if self._stream is not None and self.peak == 0.0 and self.on_silent:
-            self.on_silent("The microphone is completely silent. On macOS, allow your terminal app in System Settings > "
-                           "Privacy & Security > Microphone, then restart it. Typing still works.")
+            self.on_silent(silent_mic_help())
 
     async def stop(self) -> None:
         self._running = False

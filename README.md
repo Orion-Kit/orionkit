@@ -18,11 +18,14 @@ Install [Ollama](https://ollama.com/download) and open it. On a Mac the built-in
 
 ```sh
 python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
-.venv/bin/python scripts/download_models.py  # ~450 MB of voice models (Windows too)
+.venv/bin/python scripts/download_models.py  # about 290 MB of voice models (Windows too); safe to re-run, it resumes
 ollama pull qwen3:4b-instruct                # or any chat model
 .venv/bin/python voice_chat.py               # opens the orb window; say "Hey Orion"
 .venv/bin/python voice_chat.py --terminal    # prefer the terminal
 ```
+
+Linux: `sudo apt install libportaudio2` first. In a noisy room or with a TV on, set `ORIONKIT_WAKE_SENSITIVITY=low`
+(`high` for a quiet room or a far-away mic). Once the models are downloaded, voice needs no internet at all.
 
 Check everything headlessly (no mic needed):
 

@@ -18,14 +18,14 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 from .echo import EchoGate
 from .stt import STTWorker, Transcript
 from .tts import SpeakResult, TTSEngine
 from .vad import SpeechSegmenter, SpeechStart, Utterance
-from .wake import KeywordWakeDetector, WakeEvent, WakeWordDetector
+from .wake import KeywordWakeDetector, WakeEvent, WakeWordDetector, sensitivity
 
 log = logging.getLogger("orionkit.duplex")
 
@@ -64,7 +64,8 @@ class DuplexConfig:
     idle_min_ms: int = 160
     # Second-chance wake: short phrases heard while idle are transcribed and checked for the name.
     # Catches accents and mics the keyword spotter misses; also lets "Hey Orion, <request>" run in one go.
-    stt_wake: bool = True
+    # Off with ORIONKIT_WAKE_SENSITIVITY=low: in a room with a TV it would transcribe every phrase looking for the name.
+    stt_wake: bool = field(default_factory=lambda: sensitivity() != "low")
     stt_wake_max_s: float = 6.0
     stt_wake_pattern: str = (r"^\W*(?:(?:hey|hi|hello|ok(?:ay)?|hail|yo)[\s,]+)?"
                              r"(?:orion|orian|o'?ryan|oreon|aryan)(?:'s|s)?\b[\s,.!?]*(.*)$")

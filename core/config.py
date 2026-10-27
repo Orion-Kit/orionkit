@@ -40,6 +40,11 @@ def is_local(url: str | None) -> bool:
     return ip.is_loopback or ip.is_private or ip.is_link_local
 
 
+def local_only() -> bool:
+    """ORIONKIT_LOCAL_ONLY=1: no cloud models, web or weather tools, location lookup, update check or diagnostics."""
+    return os.environ.get("ORIONKIT_LOCAL_ONLY", "0") == "1"
+
+
 def _paths(var: str, default: list[Path]) -> list[Path]:
     raw = os.environ.get(var)
     return [Path(p).expanduser() for p in raw.split(os.pathsep) if p] if raw else default
@@ -60,6 +65,7 @@ class Settings:
     ha_url: str | None = None
     ha_token: str | None = None
     mcp_config: Path = PROJECT_ROOT / "mcp_servers.json"
+    local_only: bool = False  # ORIONKIT_LOCAL_ONLY=1: nothing leaves this computer (see README, Privacy)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -74,7 +80,8 @@ class Settings:
             workspace=workspace,
             allowed_dirs=_paths("ORIONKIT_ALLOWED_DIRS", [workspace]),
             bash_allow_network=os.environ.get("ORIONKIT_BASH_NETWORK", "0") == "1",
-            web_enabled=os.environ.get("ORIONKIT_WEB", "1") == "1",
+            web_enabled=os.environ.get("ORIONKIT_WEB", "1") == "1" and not local_only(),
+            local_only=local_only(),
             followup=os.environ.get("ORIONKIT_FOLLOWUP", "0") == "1",
             ha_url=os.environ.get("HA_URL"),
             ha_token=os.environ.get("HA_TOKEN"),
