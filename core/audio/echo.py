@@ -59,6 +59,10 @@ class EchoGate:
         self.last_levels = (0.0, 0.0)  # (mic rms, speaker rms) of the last check
         self.borderline = 0.5           # below the threshold but above this, judge by loudness too
         self.louder_than_echo = 1.6     # a real interruption is at least this much louder than the echo
+        # Even a confident match is not echo when the mic is this much louder than the speaker's learned leakage:
+        # someone is talking over Orion, and the echo still in the window keeps the correlation high. Own-voice
+        # checks peak at about 1.2x the learned coupling; a voice over it measures 1.5-1.7x (self-test, 28 Oct).
+        self.much_louder_than_echo = 1.4
         self._coupling: float | None = None
 
     def is_echo(self) -> bool:
@@ -73,6 +77,8 @@ class EchoGate:
         ref_rms = float(np.sqrt(np.mean((ref.astype(np.float32) / 32768) ** 2)))
         self.last_levels = (mic_rms, ref_rms)
         ratio = mic_rms / max(ref_rms, 1e-4)
+        if self._coupling is not None and ratio > self._coupling * self.much_louder_than_echo:
+            return False  # far louder than Orion's own leakage: a person talking over it (and not learned from)
         if sim >= self.threshold:
             # Confident echo: learn how loud the speaker sounds at the mic (room, volume and mic dependent).
             self._coupling = ratio if self._coupling is None else 0.9 * self._coupling + 0.1 * ratio
