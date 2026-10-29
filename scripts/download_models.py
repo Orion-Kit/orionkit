@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Download Orion's voice models (about 290 MB with Whisper base.en) into models/. Works on macOS, Windows and Linux.
 
-Safe to run again at any time: finished files are skipped, a download that was cut off carries on from where it
-stopped (slow or flaky connections, a laptop going to sleep), and every new file is checked against its known
+Safe to run again at any time: finished files are checked and skipped (a damaged one is downloaded again), a download
+that was cut off carries on from where it stopped (slow or flaky connections, a laptop going to sleep), and every new file is checked against its known
 SHA-256 before it's used, so a broken or tampered download is never loaded.
 
   python scripts/download_models.py              voice models + Whisper base.en
@@ -112,7 +112,19 @@ def fetch(url: str, dest: Path, size: int, sha256: str, attempts: int = ATTEMPTS
                         "firewall may block it), then run this again: what's already downloaded is kept.")
 
 
+def damaged(models: Path | None = None) -> list[str]:
+    """Files that are present but not the file we pinned (a disk error, an old interrupted download, an edit). Before,
+    present files were never checked, so running this script again could not repair one: voice failed to start with an
+    onnxruntime error and the only fix was deleting the file by hand."""
+    models = models or MODELS
+    return [n for n, (_, size, sha) in FILES.items()
+            if (models / n).is_file() and ((models / n).stat().st_size != size or _sha256(models / n) != sha)]
+
+
 def _missing() -> tuple[list[tuple[str, tuple[str, int, str]]], bool]:
+    for name in damaged():
+        print(f"✗ {name} is damaged; downloading it again")
+        (MODELS / name).unlink()
     files = [(n, spec) for n, spec in FILES.items() if not ((MODELS / n).is_file() and (MODELS / n).stat().st_size)]
     return files, not (MODELS / "kws" / "tokens.txt").is_file()
 

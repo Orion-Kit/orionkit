@@ -16,6 +16,7 @@ import numpy as np
 SAMPLE_RATE = 16_000
 FRAME_SAMPLES = 512  # 32 ms: Silero VAD's native frame at 16 kHz
 STALL_S = 2.5        # no callback for this long while running: the device went away (unplugged, sleep, switched)
+MAX_RETRY_S = 30.0   # while the microphone stays gone, look for it again at most this often
 log = logging.getLogger("orionkit.mic")
 
 
@@ -177,16 +178,24 @@ class MicStream:
         """A stream whose device disappears just stops calling back: re-scan the devices and reopen (on the new default
         if it was using the default), and tell the user if there's no microphone left."""
         told = False
+        wait = STALL_S
         while self._running:
             await asyncio.sleep(1.0)
-            if not self._running or time.monotonic() - self._last_audio < STALL_S:
+            if not self._running or time.monotonic() - self._last_audio < wait:
+                continue
+            # A re-scan closes every open stream, the speaker's too. Once the user has been told the mic is gone,
+            # never cut a reply short to look for it again; and look less often (up to every 30 s) while it stays
+            # gone. Before, a reply being read out while the mic was unplugged broke up every 3.5 s.
+            if told and any(getattr(u, "playing", False) for u in list(_OPEN) if u is not self):
                 continue
             log.warning("no audio from the microphone for %.0f s; re-scanning devices", time.monotonic() - self._last_audio)
             failed = await asyncio.to_thread(refresh_devices, sd)
             if self not in failed:
                 told = False
+                wait = STALL_S
                 continue
-            self._last_audio = time.monotonic()  # retry after another STALL_S
+            self._last_audio = time.monotonic()  # retry after the next wait
+            wait = min(wait * 2, MAX_RETRY_S)
             if not told and self.on_silent:
                 self.on_silent("The microphone stopped sending audio (unplugged?). Plug it back in, or restart Orion to "
                                f"use another one. Typing still works. ({type(failed[self]).__name__})")
